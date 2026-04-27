@@ -5,6 +5,11 @@ from .base import OscilloscopeBase
 class SimulatedOscilloscope(OscilloscopeBase):
     """Simulated oscilloscope for testing without real hardware."""
 
+    ACTIONS = {
+        'run': 'Start oscilloscope acquisition',
+        'stop': 'Stop oscilloscope acquisition',
+    }
+
     def __init__(self, resource_name: Optional[str] = None, num_channels: int = 4):
         super().__init__(resource_name or "SIM_OSC_01")
         self.num_channels = num_channels

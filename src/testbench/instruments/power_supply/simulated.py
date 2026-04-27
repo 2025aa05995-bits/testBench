@@ -5,6 +5,15 @@ from .base import PowerSupplyBase
 class SimulatedPowerSupply(PowerSupplyBase):
     """Simulated power supply for testing without real hardware."""
 
+    ACTIONS = {
+        'on': 'Enable power supply',
+        'off': 'Disable power supply',
+        'setVoltage': 'Set output voltage (V)',
+        'set_voltage': 'Set output voltage (V)',
+        'setCurrent': 'Set current limit (A)',
+        'set_current': 'Set current limit (A)',
+    }
+
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_PS_01")
         self._voltage = 0.0

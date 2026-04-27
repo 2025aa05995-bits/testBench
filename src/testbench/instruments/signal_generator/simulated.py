@@ -5,6 +5,15 @@ from .base import SignalGeneratorBase
 class SimulatedSignalGenerator(SignalGeneratorBase):
     """Simulated signal generator for testing without real hardware."""
 
+    ACTIONS = {
+        'output_on': 'Enable signal output',
+        'output_off': 'Disable signal output',
+        'setFrequency': 'Set frequency (Hz)',
+        'set_frequency': 'Set frequency (Hz)',
+        'setAmplitude': 'Set amplitude (V)',
+        'set_amplitude': 'Set amplitude (V)',
+    }
+
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_SG_01")
         self._output_on = False
