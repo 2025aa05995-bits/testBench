@@ -1,0 +1,140 @@
+{
+  "instruments": {
+    "ps": {
+      "name": "Power Supply",
+      "simulate": true,
+      "type": "PowerSupply",
+      "visa_resource": "GPIB0::1::INSTR",
+      "ip_address": "192.168.1.10",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "Programmable DC power supply"
+    },
+    "osc": {
+      "name": "Oscilloscope",
+      "simulate": true,
+      "type": "Oscilloscope",
+      "visa_resource": "GPIB0::2::INSTR",
+      "ip_address": "192.168.1.11",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "Digital oscilloscope"
+    },
+    "sg": {
+      "name": "Signal Generator",
+      "simulate": true,
+      "type": "SignalGenerator",
+      "visa_resource": "GPIB0::3::INSTR",
+      "ip_address": "192.168.1.12",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "RF signal generator"
+    },
+    "sa": {
+      "name": "Spectrum Analyzer",
+      "simulate": true,
+      "type": "SpectrumAnalyzer",
+      "visa_resource": "GPIB0::4::INSTR",
+      "ip_address": "192.168.1.13",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "Spectrum analyzer"
+    },
+    "mm": {
+      "name": "Multimeter",
+      "simulate": true,
+      "type": "Multimeter",
+      "visa_resource": "GPIB0::5::INSTR",
+      "ip_address": "192.168.1.14",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "Digital multimeter"
+    },
+    "fg": {
+      "name": "Function Generator",
+      "simulate": true,
+      "type": "FunctionGenerator",
+      "visa_resource": "GPIB0::6::INSTR",
+      "ip_address": "192.168.1.15",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "Arbitrary waveform function generator"
+    },
+    "na": {
+      "name": "Network Analyzer",
+      "simulate": true,
+      "type": "NetworkAnalyzer",
+      "visa_resource": "GPIB0::7::INSTR",
+      "ip_address": "192.168.1.16",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "Network analyzer for S-parameter measurements"
+    },
+    "fc": {
+      "name": "Frequency Counter",
+      "simulate": true,
+      "type": "FrequencyCounter",
+      "visa_resource": "GPIB0::8::INSTR",
+      "ip_address": "192.168.1.17",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "Frequency counter"
+    },
+    "el": {
+      "name": "Electronic Load",
+      "simulate": true,
+      "type": "ElectronicLoad",
+      "visa_resource": "GPIB0::9::INSTR",
+      "ip_address": "192.168.1.18",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "Programmable electronic load"
+    },
+    "smu": {
+      "name": "Source Measure Unit",
+      "simulate": true,
+      "type": "SourceMeasureUnit",
+      "visa_resource": "GPIB0::10::INSTR",
+      "ip_address": "192.168.1.19",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "Precision source measure unit"
+    },
+    "tc": {
+      "name": "Temperature Chamber",
+      "simulate": true,
+      "type": "TemperatureChamber",
+      "visa_resource": "GPIB0::11::INSTR",
+      "ip_address": "192.168.1.20",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "Environmental test chamber"
+    },
+    "pm": {
+      "name": "Power Meter",
+      "simulate": true,
+      "type": "PowerMeter",
+      "visa_resource": "GPIB0::12::INSTR",
+      "ip_address": "192.168.1.21",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "RF power meter"
+    }
+  },
+  "global_settings": {
+    "simulate_all": false,
+    "connection_timeout_ms": 5000,
+    "auto_connect": true,
+    "log_level": "INFO",
+    "enable_cache": true
+  },
+  "communication": {
+    "default_protocol": "VISA",
+    "protocols": [
+      "VISA",
+      "TCP/IP",
+      "Serial",
+      "USB"
+    ]
+  }
+}

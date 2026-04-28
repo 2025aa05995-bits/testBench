@@ -20,9 +20,11 @@ def test_autocomplete():
     # Test cases
     test_cases = [
         ("bench.", "Show all commands"),
+        ("bc.", "Show all commands with alias"),
         ("bench.ps", "Power supply commands"),
+        ("bc.ps", "Power supply commands using alias"),
         ("bench.ps.s", "Commands starting with 's'"),
-        ("bench.mm.m", "Multimeter measure commands"),
+        ("bc.mm.m", "Multimeter measure commands using alias"),
         ("bench.osc.r", "Oscilloscope run/stop"),
     ]
 

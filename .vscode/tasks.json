@@ -1,0 +1,118 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Install dependencies",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/pip.exe",
+      "args": ["install", "-r", "requirements.txt"],
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Run GUI Chat",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["gui_chat.py"],
+      "problemMatcher": [],
+      "group": "run",
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Run Bench CLI",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["bench.py"],
+      "problemMatcher": [],
+      "group": "run",
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Run Tests",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/pytest.exe",
+      "args": ["-v", "--tb=short"],
+      "problemMatcher": [],
+      "group": "test",
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Test Simulated Instruments",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["test_simulated_instruments.py"],
+      "problemMatcher": [],
+      "group": "test",
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Run Tests with Coverage",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/pytest.exe",
+      "args": ["--cov=src/testbench", "--cov-report=html", "-v"],
+      "problemMatcher": [],
+      "group": "test",
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Format Code (black)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/black.exe",
+      "args": ["src", "*.py"],
+      "problemMatcher": [],
+      "group": "none",
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Lint Code (flake8)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/flake8.exe",
+      "args": ["src", "*.py", "--max-line-length=120", "--ignore=E203,W503"],
+      "problemMatcher": [],
+      "group": "none",
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Type Check (mypy)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/mypy.exe",
+      "args": ["src", "--ignore-missing-imports"],
+      "problemMatcher": [],
+      "group": "none",
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Clean Build Artifacts",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-Command", "Get-ChildItem -Path .,.\\src -Include __pycache__,.pytest_cache,.coverage,.mypy_cache -Recurse -Force | Remove-Item -Recurse -Force"],
+      "problemMatcher": [],
+      "group": "none",
+      "presentation": {
+        "reveal": "always"
+      }
+    }
+  ]
+}

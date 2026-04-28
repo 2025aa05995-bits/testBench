@@ -4,12 +4,15 @@ from typing import Optional, Dict
 
 class CommandParser:
     def parse(self, command: str):
-        # Example: bench.ps.on True or bench.ps.setVoltage 12
+        # Example: bench.ps.on True or bc.ps.on True
         pattern = r"^(\w+)\.(\w+)\.(\w+)(?:\s+(.*))?$"
         match = re.match(pattern, command.strip())
         if not match:
             return None
         top, category, action, args = match.groups()
+        top = top.lower()
+        if top not in {'bench', 'bc'}:
+            return None
         args = args.split() if args else []
         return {
             'top': top,

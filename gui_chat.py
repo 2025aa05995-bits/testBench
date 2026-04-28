@@ -1,10 +1,11 @@
-from command_parser import CommandParser, handle_help
-from testbench.command_registry import CommandRegistry
 import sys
 import os
 
 # Add src directory to path BEFORE importing testbench modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+from command_parser import CommandParser, handle_help
+from testbench.command_registry import CommandRegistry
 
 
 class CommandCompleter:
@@ -15,12 +16,14 @@ class CommandCompleter:
         self.all_commands = self._build_command_list()
 
     def _build_command_list(self):
-        """Build list of all available commands in 'bench.category.action' format."""
+        """Build list of all available commands in 'bench.<category>.<action>' or 'bc.<category>.<action>' format."""
+        tops = ['bench', 'bc']
         commands = []
         for category, actions in self.registry.get_all_commands().items():
             for action in actions.keys():
-                commands.append(f"bench.{category}.{action}")
-        return sorted(commands)
+                for top in tops:
+                    commands.append(f"{top}.{category}.{action}")
+        return sorted(set(commands))
 
     def get_suggestions(self, partial_input: str, max_suggestions: int = 10) -> list:
         """Get autocomplete suggestions for the given partial input.
@@ -90,13 +93,13 @@ if PYQT_AVAILABLE:
             # Show welcome message
             self._append_text("Lab Automation Chat\n")
             self._append_text("Type 'help' for available commands\n")
-            self._append_text("Type 'bench.' to see command suggestions\n")
+            self._append_text("Type 'bench.' or 'bc.' to see command suggestions\n")
             self._append_text("=" * 60 + "\n\n")
 
         def on_input_changed(self):
             """Update suggestions when input changes."""
             text = self.input_line.text().strip()
-            if text.startswith('bench.'):
+            if text.startswith(('bench.', 'bc.')):
                 suggestions = self.completer.get_suggestions(text)
                 self._update_suggestions(suggestions)
             else:
@@ -142,8 +145,8 @@ if PYQT_AVAILABLE:
             parsed = self.parser.parse(command)
             if not parsed:
                 self._append_text(
-                    "Error: Invalid command format. Expected: bench.<category>.<action> [args...]\n")
-                self._append_text("       Example: bench.ps.on True\n")
+                    "Error: Invalid command format. Expected: bench.<category>.<action> or bc.<category>.<action> [args...]\n")
+                self._append_text("       Example: bench.ps.on True or bc.ps.on True\n")
                 self._append_text(
                     "       Type 'help' for all available commands\n\n")
                 self.input_line.clear()
@@ -232,13 +235,13 @@ else:
                 # Show welcome message
                 self._append_text("Lab Automation Chat\n")
                 self._append_text("Type 'help' for available commands\n")
-                self._append_text("Type 'bench.' to see command suggestions\n")
+                self._append_text("Type 'bench.' or 'bc.' to see command suggestions\n")
                 self._append_text("=" * 60 + "\n\n")
 
             def on_input_changed(self, event=None):
                 """Update suggestions when input changes."""
                 text = self.input_line.get().strip()
-                if text.startswith('bench.'):
+                if text.startswith(('bench.', 'bc.')):
                     suggestions = self.completer.get_suggestions(text)
                     self._update_suggestions(suggestions)
                 else:
@@ -331,8 +334,8 @@ else:
                 parsed = self.parser.parse(command)
                 if not parsed:
                     self._append_text(
-                        "Error: Invalid command format. Expected: bench.<category>.<action> [args...]\n")
-                    self._append_text("       Example: bench.ps.on True\n")
+                        "Error: Invalid command format. Expected: bench.<category>.<action> or bc.<category>.<action> [args...]\n")
+                    self._append_text("       Example: bench.ps.on True or bc.ps.on True\n")
                     self._append_text(
                         "       Type 'help' for all available commands\n\n")
                     self.input_line.delete(0, tk.END)

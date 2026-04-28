@@ -52,7 +52,7 @@ def test_command_execution():
     parser = CommandParser()
     registry = CommandRegistry()
 
-    # Test valid command
+    # Test valid command with bench alias
     print("\nTest 1: Parse 'bench.ps.on True'")
     print("-" * 70)
     parsed = parser.parse("bench.ps.on True")
@@ -65,10 +65,10 @@ def test_command_execution():
         except Exception as e:
             print(f"Error: {e}")
 
-    # Test another command
-    print("\n\nTest 2: Parse 'bench.ps.setVoltage 12.5'")
+    # Test another command with bc alias
+    print("\n\nTest 2: Parse 'bc.ps.setVoltage 12.5'")
     print("-" * 70)
-    parsed = parser.parse("bench.ps.setVoltage 12.5")
+    parsed = parser.parse("bc.ps.setVoltage 12.5")
     print(f"Parsed: {parsed}")
     if parsed:
         try:
