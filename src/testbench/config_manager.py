@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 
 class ConfigManager:
@@ -125,6 +125,89 @@ class ConfigManager:
         if instrument:
             return instrument.get('name')
         return None
+
+    def get_protocol(self, category: str) -> str:
+        """Get the preferred communication protocol for an instrument."""
+        instrument = self.get_instrument_config(category)
+        if instrument and instrument.get('protocol'):
+            return instrument['protocol']
+        return self.config.get('communication', {}).get('default_protocol', 'VISA')
+
+    def get_serial_port(self, category: str) -> Optional[str]:
+        """Get serial port name for an instrument."""
+        instrument = self.get_instrument_config(category)
+        if instrument:
+            return instrument.get('serial_port')
+        return None
+
+    def get_baudrate(self, category: str) -> int:
+        """Get baud rate for a serial instrument."""
+        instrument = self.get_instrument_config(category)
+        if instrument:
+            return instrument.get('baudrate', 9600)
+        return 9600
+
+    def get_usb_resource(self, category: str) -> Optional[str]:
+        """Get USB/VISA resource name for an instrument."""
+        instrument = self.get_instrument_config(category)
+        if instrument:
+            return instrument.get('usb_resource')
+        return None
+
+    def discover_visa_resources(self) -> List[str]:
+        """Discover available VISA resources."""
+        try:
+            import pyvisa
+        except ImportError:
+            return []
+
+        manager = pyvisa.ResourceManager()
+        try:
+            return list(manager.list_resources())
+        except Exception:
+            return []
+
+    def discover_serial_ports(self) -> List[str]:
+        """Discover available serial ports."""
+        try:
+            import serial.tools.list_ports as list_ports
+        except ImportError:
+            return []
+
+        return [port.device for port in list_ports.comports()]
+
+    def discover_tcp_instruments(self) -> List[str]:
+        """Discover configured TCP/IP devices that accept a connection."""
+        import socket
+
+        reachable: List[str] = []
+        for category, config in self.get_all_instruments().items():
+            ip = config.get('ip_address')
+            port = config.get('port', 5025)
+            if not ip:
+                continue
+            try:
+                with socket.create_connection((ip, port), timeout=self.get_timeout(category) / 1000.0):
+                    reachable.append(f"{category}:{ip}:{port}")
+            except Exception:
+                continue
+        return reachable
+
+    def discover_available_devices(self) -> Dict[str, Any]:
+        """Discover available devices for each supported transport."""
+        return {
+            'visa': self.discover_visa_resources(),
+            'serial': self.discover_serial_ports(),
+            'tcp_ip': self.discover_tcp_instruments(),
+        }
+
+    def set_simulation(self, category: str, simulate: bool) -> None:
+        """Toggle simulation mode for a specific instrument."""
+        instrument = self.get_instrument_config(category)
+        if instrument is None:
+            raise ValueError(f"Unknown instrument category: {category}")
+        instrument['simulate'] = simulate
+        self.save_config()
 
     def get_timeout(self, category: str) -> int:
         """Get connection timeout for an instrument.

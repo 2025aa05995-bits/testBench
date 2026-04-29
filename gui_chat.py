@@ -89,6 +89,8 @@ if PYQT_AVAILABLE:
             self._append_text("Type 'help' for available commands\n")
             self._append_text("Type 'bench.' or 'bc.' to see command suggestions\n")
             self._append_text("Use semicolons or Shift+Enter for multiple commands.\n")
+            self._append_text("Use bench.config.* to manage real/sim mode and discovery.\n")
+            self._append_text("Use bench.<inst>.raw <SCPI> for raw instrument commands in real mode.\n")
             self._append_text('=' * 60 + '\n\n')
 
         def eventFilter(self, obj, event):
@@ -212,6 +214,8 @@ else:
                 self._append_text("Type 'help' for available commands\n")
                 self._append_text("Type 'bench.' or 'bc.' to see command suggestions\n")
                 self._append_text("Use semicolons or Shift+Enter for multiple commands.\n")
+                self._append_text("Use bench.config.* to manage real/sim mode and discovery.\n")
+                self._append_text("Use bench.<inst>.raw <SCPI> for raw instrument commands in real mode.\n")
                 self._append_text('=' * 60 + '\n\n')
 
             def on_input_changed(self, event=None):

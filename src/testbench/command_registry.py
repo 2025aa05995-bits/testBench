@@ -1,7 +1,9 @@
 """Central registry for all available instrument commands."""
 
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
+from .config_manager import ConfigManager
 from .instruments import (
+    RealInstrumentAdapter,
     SimulatedPowerSupply,
     SimulatedOscilloscope,
     SimulatedSignalGenerator,
@@ -13,46 +15,133 @@ from .instruments import (
     SimulatedElectronicLoad,
     SimulatedSourceMeasureUnit,
     SimulatedTemperatureChamber,
+    SimulatedPowerMeter,
+    SimulatedSignalAnalyzer,
 )
+
+
+class ConfigInterface:
+    """Configuration command helper for runtime toggles and discovery."""
+
+    ACTIONS = {
+        'reload': 'Reload configuration from testbenchconfig.json',
+        'show': 'Show the current configuration and instrument modes',
+        'discover': 'Discover available VISA, serial, and TCP/IP devices',
+        'set_simulation': 'Toggle simulation/real mode for an instrument',
+        'status': 'Show connection status for a specific instrument',
+    }
+
+    def __init__(self, config_manager: ConfigManager, registry: 'CommandRegistry'):
+        self.config_manager = config_manager
+        self.registry = registry
+
+    def execute(self, action: str, args: List[str]) -> Any:
+        if action == 'reload':
+            self.config_manager.load_config()
+            self.registry.reload_instruments()
+            return 'Configuration reloaded.'
+
+        if action == 'show':
+            return self._format_config()
+
+        if action == 'discover':
+            devices = self.config_manager.discover_available_devices()
+            return self._format_discovery(devices)
+
+        if action == 'set_simulation':
+            if len(args) < 2:
+                raise ValueError('Usage: bench.config.set_simulation <category> <true|false>')
+            category = args[0]
+            simulate = args[1].lower() not in {'false', '0', 'no', 'off', 'real'}
+            self.config_manager.set_simulation(category, simulate)
+            self.registry.reload_instruments()
+            mode = 'SIMULATED' if simulate else 'REAL'
+            return f'{category} set to {mode} mode.'
+
+        if action == 'status':
+            if len(args) == 0:
+                return self.registry.get_status_summary()
+            category = args[0]
+            if category not in self.registry.instruments:
+                raise ValueError(f'Unknown category: {category}')
+            instrument = self.registry.instruments[category]
+            if hasattr(instrument, 'status'):
+                return instrument.status()
+            return {'connected': getattr(instrument, 'connected', False)}
+
+        raise ValueError(f'Unknown config action: {action}')
+
+    def _format_config(self) -> str:
+        lines = ['Configuration:']
+        for category, cfg in self.config_manager.get_all_instruments().items():
+            mode = 'SIMULATED' if self.config_manager.should_simulate(category) else 'REAL'
+            lines.append(f"{category}: {cfg.get('name')} ({mode}) protocol={self.config_manager.get_protocol(category)}")
+        return '\n'.join(lines)
+
+    def _format_discovery(self, devices: Dict[str, Any]) -> str:
+        lines = ['Device discovery results:']
+        for section, entries in devices.items():
+            lines.append(f"{section}:")
+            if not entries:
+                lines.append('  none found')
+                continue
+            for entry in entries:
+                lines.append(f'  {entry}')
+        return '\n'.join(lines)
 
 
 class CommandRegistry:
     """Registry of all available instrument commands."""
 
-    def __init__(self):
+    INSTRUMENT_FACTORIES = {
+        'ps': SimulatedPowerSupply,
+        'osc': SimulatedOscilloscope,
+        'sg': SimulatedSignalGenerator,
+        'sa': SimulatedSpectrumAnalyzer,
+        'mm': SimulatedMultimeter,
+        'fg': SimulatedFunctionGenerator,
+        'na': SimulatedNetworkAnalyzer,
+        'fc': SimulatedFrequencyCounter,
+        'el': SimulatedElectronicLoad,
+        'smu': SimulatedSourceMeasureUnit,
+        'tc': SimulatedTemperatureChamber,
+        'pm': SimulatedPowerMeter,
+    }
+
+    def __init__(self, config_file: str = 'testbenchconfig.json'):
         """Initialize the registry with all available instruments."""
-        self.instruments = {
-            'ps': SimulatedPowerSupply(),
-            'osc': SimulatedOscilloscope(),
-            'sg': SimulatedSignalGenerator(),
-            'sa': SimulatedSpectrumAnalyzer(),
-            'mm': SimulatedMultimeter(),
-            'fg': SimulatedFunctionGenerator(),
-            'na': SimulatedNetworkAnalyzer(),
-            'fc': SimulatedFrequencyCounter(),
-            'el': SimulatedElectronicLoad(),
-            'smu': SimulatedSourceMeasureUnit(),
-            'tc': SimulatedTemperatureChamber(),
-        }
-        # Connect all instruments
+        self.config_manager = ConfigManager(config_file)
+        self.instruments = self._build_instruments()
+        self.instruments['config'] = ConfigInterface(self.config_manager, self)
+        self._auto_connect_instruments()
+
+    def _build_instruments(self) -> Dict[str, Any]:
+        instruments: Dict[str, Any] = {}
+        for category, factory in self.INSTRUMENT_FACTORIES.items():
+            if not self.config_manager.should_simulate(category):
+                instruments[category] = RealInstrumentAdapter(category, self.config_manager)
+            else:
+                resource_name = self.config_manager.get_visa_resource(category) or self.config_manager.get_ip_address(category)
+                instruments[category] = factory(resource_name)
+        return instruments
+
+    def _auto_connect_instruments(self) -> None:
+        if not self.config_manager.get_global_setting('auto_connect', True):
+            return
         for instrument in self.instruments.values():
-            if not instrument.connected:
+            if hasattr(instrument, 'connected') and not instrument.connected:
                 try:
                     instrument.connect()
                 except Exception:
                     pass
 
-    def get_all_commands(self) -> Dict[str, Dict[str, str]]:
-        """Get all available commands grouped by instrument.
+    def reload_instruments(self) -> None:
+        self.instruments = self._build_instruments()
+        self.instruments['config'] = ConfigInterface(self.config_manager, self)
+        self._auto_connect_instruments()
 
-        Returns:
-            Dict mapping instrument category to its available actions and descriptions.
-            Format: {
-                'ps': {'on': 'Enable power supply', 'off': 'Disable power supply', ...},
-                'mm': {'measure_voltage': 'Measure DC voltage', ...},
-                ...
-            }
-        """
+    def get_all_commands(self) -> Dict[str, Dict[str, str]]:
+        """Get all available commands grouped by instrument."""
         result = {}
         for category, instrument in self.instruments.items():
             if hasattr(instrument, 'ACTIONS'):
@@ -60,14 +149,7 @@ class CommandRegistry:
         return result
 
     def get_instrument_commands(self, category: str) -> Optional[Dict[str, str]]:
-        """Get commands for a specific instrument.
-
-        Args:
-            category: Instrument category (e.g., 'ps', 'mm')
-
-        Returns:
-            Dict mapping action names to descriptions, or None if category not found.
-        """
+        """Get commands for a specific instrument."""
         if category not in self.instruments:
             return None
         instrument = self.instruments[category]
@@ -76,38 +158,18 @@ class CommandRegistry:
         return None
 
     def execute(self, category: str, action: str, args: List[str]) -> Any:
-        """Execute a command on a specific instrument.
-
-        Args:
-            category: Instrument category (e.g., 'ps', 'mm')
-            action: Action name (e.g., 'on', 'measure_voltage')
-            args: List of arguments for the action
-
-        Returns:
-            The result of the action execution
-
-        Raises:
-            ValueError: If category or action is not found
-        """
+        """Execute a command on a specific instrument."""
         if category not in self.instruments:
             raise ValueError(f"Unknown instrument category: {category}")
 
         instrument = self.instruments[category]
         try:
-            result = instrument.execute(action, args)
-            return result
+            return instrument.execute(action, args)
         except Exception as e:
             raise ValueError(f"Error executing {category}.{action}: {str(e)}")
 
     def get_instrument_name(self, category: str) -> Optional[str]:
-        """Get the full name of an instrument by category.
-
-        Args:
-            category: Instrument category (e.g., 'ps')
-
-        Returns:
-            The full instrument name (e.g., 'Power Supply') or None if not found.
-        """
+        """Get the full name of an instrument by category."""
         names = {
             'ps': 'Power Supply',
             'osc': 'Oscilloscope',
@@ -120,5 +182,15 @@ class CommandRegistry:
             'el': 'Electronic Load',
             'smu': 'Source Measure Unit',
             'tc': 'Temperature Chamber',
+            'pm': 'Power Meter',
+            'config': 'Configuration Controls',
         }
         return names.get(category)
+
+    def get_status_summary(self) -> Dict[str, Any]:
+        status = {}
+        for category, instrument in self.instruments.items():
+            if category == 'config':
+                continue
+            status[category] = instrument.status() if hasattr(instrument, 'status') else {'connected': getattr(instrument, 'connected', False)}
+        return status

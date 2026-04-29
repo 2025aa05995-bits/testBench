@@ -30,6 +30,7 @@ from .source_measure_unit import SourceMeasureUnitBase, SimulatedSourceMeasureUn
 from .temperature_chamber import TemperatureChamberBase, SimulatedTemperatureChamber
 from .power_meter import PowerMeterBase, SimulatedPowerMeter
 from .signal_analyzer import SignalAnalyzerBase, SimulatedSignalAnalyzer
+from .real import RealInstrumentAdapter
 
 __all__ = [
     'InstrumentBase',
@@ -46,4 +47,5 @@ __all__ = [
     'TemperatureChamberBase', 'SimulatedTemperatureChamber',
     'PowerMeterBase', 'SimulatedPowerMeter',
     'SignalAnalyzerBase', 'SimulatedSignalAnalyzer',
+    'RealInstrumentAdapter',
 ]

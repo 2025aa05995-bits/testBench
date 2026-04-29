@@ -5,9 +5,12 @@
 The `testbenchconfig.json` file allows you to configure all instruments in the test bench with the following properties:
 
 - **simulate**: Boolean flag to enable/disable simulation mode
+- **protocol**: Transport protocol for real instruments (e.g. `VISA`, `TCP/IP`, `Serial`)
 - **visa_resource**: VISA resource name (e.g., "GPIB0::1::INSTR")
 - **ip_address**: Network IP address for TCP/IP connections
 - **port**: Network port (default: 5025)
+- **serial_port**: Serial port device path for serial instruments
+- **baudrate**: Serial baud rate (default: 9600)
 - **type**: Instrument type
 - **timeout_ms**: Connection timeout in milliseconds
 
@@ -78,6 +81,24 @@ ps_config = config.get_instrument_config('ps')
 all_instruments = config.get_all_instruments()
 
 # Get specific properties
+```
+
+## Runtime instrument mode and discovery
+
+The registry also supports runtime mode switching and device discovery via the `config` command category:
+
+- `bench.config.show` — display loaded instrument configuration
+- `bench.config.discover` — discover available VISA, serial, and TCP/IP devices
+- `bench.config.set_simulation ps false` — switch the `ps` instrument to real mode
+- `bench.config.set_simulation ps true` — switch the `ps` instrument back to simulation
+- `bench.config.status ps` — show the current connection status of the `ps` instrument
+
+```python
+config = ConfigManager()
+print(config.discover_available_devices())
+```
+
+### Get specific properties
 name = config.get_instrument_name('ps')
 type_name = config.get_instrument_type('ps')
 timeout = config.get_timeout('ps')
