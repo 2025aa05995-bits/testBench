@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from command_parser import CommandParser, handle_help
 from testbench.command_registry import CommandRegistry
+from chat_plotting import try_extract_plot_command, render_plot_to_png_bytes
 
 
 class CommandCompleter:
@@ -67,8 +68,7 @@ try:
         QMessageBox,
     )
     from PyQt5.QtCore import Qt, QEvent
-    from PyQt5.QtGui import QGuiApplication
-    from PyQt5.QtGui import QTextCursor, QTextCharFormat
+    from PyQt5.QtGui import QGuiApplication, QImage, QTextCursor, QTextCharFormat
     PYQT_AVAILABLE = True
 except ImportError:
     PYQT_AVAILABLE = False
@@ -185,6 +185,11 @@ if PYQT_AVAILABLE:
             self.registry = CommandRegistry()
             self.completer = CommandCompleter(self.registry)
 
+            self._command_history = []
+            self._history_max = 5
+            self._history_browse_index = None
+            self._history_setting_text = False
+
             self.status_bar = self.statusBar()
             self.update_status_bar()
 
@@ -194,7 +199,53 @@ if PYQT_AVAILABLE:
             self._append_text("Use semicolons or Shift+Enter for multiple commands.\n")
             self._append_text("Use bench.config.* to manage real/sim mode and discovery.\n")
             self._append_text("Use bench.<inst>.raw <SCPI> for raw instrument commands in real mode.\n")
+            self._append_text(
+                "Plot: plot(bc.sg.measure frequency) — scalar; plot list data — 1D; "
+                "plot(bc.osc.get_trace 1) after bc.osc.run — time vs voltage.\n"
+            )
+            self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
             self._append_text('=' * 60 + '\n\n')
+
+        def _history_append(self, text: str) -> None:
+            t = (text or "").strip()
+            if not t:
+                return
+            if self._command_history and self._command_history[-1] == t:
+                return
+            self._command_history.append(t)
+            self._command_history = self._command_history[-self._history_max :]
+
+        def _set_input_programmatic(self, text: str) -> None:
+            self._history_setting_text = True
+            try:
+                self.input_line.setPlainText(text)
+                cursor = self.input_line.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                self.input_line.setTextCursor(cursor)
+                self.on_input_changed()
+            finally:
+                self._history_setting_text = False
+
+        def _history_up(self) -> None:
+            if not self._command_history:
+                return
+            if self._history_browse_index is None:
+                self._history_browse_index = len(self._command_history) - 1
+            elif self._history_browse_index > 0:
+                self._history_browse_index -= 1
+            else:
+                return
+            self._set_input_programmatic(self._command_history[self._history_browse_index])
+
+        def _history_down(self) -> None:
+            if self._history_browse_index is None:
+                return
+            if self._history_browse_index < len(self._command_history) - 1:
+                self._history_browse_index += 1
+                self._set_input_programmatic(self._command_history[self._history_browse_index])
+            else:
+                self._history_browse_index = None
+                self._set_input_programmatic("")
 
         def _reload_after_config_change(self, source_label: str) -> None:
             self.registry.reload_instruments()
@@ -228,6 +279,7 @@ if PYQT_AVAILABLE:
             self.input_line.setTextCursor(cursor)
             self.input_line.setFocus()
             self.suggestions_list.hide()
+            self._history_browse_index = None
 
         def eventFilter(self, obj, event):
             if obj is self.input_line and event.type() == QEvent.KeyPress:
@@ -243,6 +295,13 @@ if PYQT_AVAILABLE:
                             else:
                                 current = (current - 1 + count) % count
                         self.suggestions_list.setCurrentRow(current)
+                        return True
+
+                if event.key() == Qt.Key_Up:
+                    self._history_up()
+                    return True
+                if event.key() == Qt.Key_Down:
+                    self._history_down()
                     return True
 
                 if event.key() == Qt.Key_Tab and self.suggestions_list.isVisible():
@@ -262,6 +321,8 @@ if PYQT_AVAILABLE:
             return super().eventFilter(obj, event)
 
         def on_input_changed(self):
+            if not self._history_setting_text:
+                self._history_browse_index = None
             text = self.input_line.toPlainText().strip()
             last_fragment = self._get_last_fragment(text)
             if last_fragment.startswith(('bench.', 'bc.')):
@@ -290,6 +351,8 @@ if PYQT_AVAILABLE:
                 return
 
             self.suggestions_list.hide()
+            self._history_append(raw_text)
+            self._history_browse_index = None
             commands = [cmd.strip() for cmd in re.split(r'[;\n\r]+', raw_text) if cmd.strip()]
             for command in commands:
                 self._append_text(f'[{self._timestamp()}] You: {command}\n')
@@ -301,6 +364,24 @@ if PYQT_AVAILABLE:
                     args = command[5:].strip().split()
                     response = handle_help(args, self.registry)
                     self._append_text(f'\n{response}\n\n')
+                    continue
+
+                plot_inner = try_extract_plot_command(command)
+                if plot_inner is not None:
+                    parsed = self.parser.parse(plot_inner)
+                    if not parsed:
+                        self._append_error(
+                            'Error: plot(inner) needs a valid bench command, e.g. plot(bc.sg.measure frequency)\n\n')
+                        continue
+                    try:
+                        result = self.registry.execute(parsed['category'], parsed['action'], parsed['args'])
+                        self._append_text(f'Result: {result}\n')
+                        self._append_plot_from_data(result)
+                        self._append_text('\n')
+                    except ValueError as e:
+                        self._append_error(f'Error: {e}\n\n')
+                    except Exception as e:
+                        self._append_error(f'Error: {e}\n\n')
                     continue
 
                 parsed = self.parser.parse(command)
@@ -340,6 +421,26 @@ if PYQT_AVAILABLE:
             char_format = QTextCharFormat()
             char_format.setForeground(Qt.red)
             cursor.insertText(text, char_format)
+            self.chat_display.setTextCursor(cursor)
+            self.chat_display.ensureCursorVisible()
+
+        def _append_plot_from_data(self, data):
+            try:
+                png = render_plot_to_png_bytes(data)
+            except Exception as e:
+                self._append_error(f'Plot error: {e}\n\n')
+                return
+            qimg = QImage.fromData(png)
+            if qimg.isNull():
+                self._append_error('Plot error: could not load image\n\n')
+                return
+            max_w = max(320, min(720, self.chat_display.width() - 40))
+            if qimg.width() > max_w:
+                qimg = qimg.scaledToWidth(max_w, Qt.SmoothTransformation)
+            cursor = self.chat_display.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            cursor.insertImage(qimg)
+            cursor.insertText('\n')
             self.chat_display.setTextCursor(cursor)
             self.chat_display.ensureCursorVisible()
 
@@ -391,12 +492,17 @@ if PYQT_AVAILABLE:
             try:
                 with open(filename, 'r', encoding='utf-8', errors='replace') as f:
                     content = f.read()
-                self.input_line.setPlainText(content.strip())
-                cursor = self.input_line.textCursor()
-                cursor.movePosition(QTextCursor.End)
-                self.input_line.setTextCursor(cursor)
+                self._history_browse_index = None
+                self._history_setting_text = True
+                try:
+                    self.input_line.setPlainText(content.strip())
+                    cursor = self.input_line.textCursor()
+                    cursor.movePosition(QTextCursor.End)
+                    self.input_line.setTextCursor(cursor)
+                    self.on_input_changed()
+                finally:
+                    self._history_setting_text = False
                 self.input_line.setFocus()
-                self.on_input_changed()
                 self._append_text(f'Loaded script into command box: {filename}\n\n')
             except Exception as e:
                 self._append_error(f'Error loading script: {e}\n\n')
@@ -662,15 +768,65 @@ else:
                 self.completer = CommandCompleter(self.registry)
                 self.selected_suggestion_index = -1
 
+                self._command_history = []
+                self._history_max = 5
+                self._history_browse_index = None
+                self._history_setting_text = False
+
                 self._append_text('Lab Automation Chat\n')
                 self._append_text("Type 'help' for available commands\n")
                 self._append_text("Type 'bench.' or 'bc.' to see command suggestions\n")
                 self._append_text("Use semicolons or Shift+Enter for multiple commands.\n")
                 self._append_text("Use bench.config.* to manage real/sim mode and discovery.\n")
                 self._append_text("Use bench.<inst>.raw <SCPI> for raw instrument commands in real mode.\n")
+                self._append_text(
+                    "Plot: plot(bc.sg.measure frequency) — scalar; 1D list plots vs index; "
+                    "plot(bc.osc.get_trace 1) after bc.osc.run — time vs voltage.\n"
+                )
+                self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
                 self._append_text('=' * 60 + '\n\n')
 
                 self.update_status_label()
+
+            def _history_append(self, text: str) -> None:
+                t = (text or "").strip()
+                if not t:
+                    return
+                if self._command_history and self._command_history[-1] == t:
+                    return
+                self._command_history.append(t)
+                self._command_history = self._command_history[-self._history_max :]
+
+            def _set_input_programmatic(self, text: str) -> None:
+                self._history_setting_text = True
+                try:
+                    self.input_line.delete('1.0', tk.END)
+                    self.input_line.insert('1.0', text)
+                    self.input_line.mark_set(tk.INSERT, tk.END)
+                    self.on_input_changed()
+                finally:
+                    self._history_setting_text = False
+
+            def _history_up(self) -> None:
+                if not self._command_history:
+                    return
+                if self._history_browse_index is None:
+                    self._history_browse_index = len(self._command_history) - 1
+                elif self._history_browse_index > 0:
+                    self._history_browse_index -= 1
+                else:
+                    return
+                self._set_input_programmatic(self._command_history[self._history_browse_index])
+
+            def _history_down(self) -> None:
+                if self._history_browse_index is None:
+                    return
+                if self._history_browse_index < len(self._command_history) - 1:
+                    self._history_browse_index += 1
+                    self._set_input_programmatic(self._command_history[self._history_browse_index])
+                else:
+                    self._history_browse_index = None
+                    self._set_input_programmatic("")
 
             def _get_last_fragment(self, text: str) -> str:
                 return re.split(r'[;\n\r]+', text)[-1].strip()
@@ -693,8 +849,12 @@ else:
                 self.input_line.insert('1.0', new_text.strip())
                 self.input_line.mark_set(tk.INSERT, tk.END)
                 self.suggestions_list.pack_forget()
+                self._history_browse_index = None
 
             def on_input_changed(self, event=None):
+                if not self._history_setting_text:
+                    if event is None or getattr(event, 'keysym', '') not in ('Up', 'Down'):
+                        self._history_browse_index = None
                 text = self.input_line.get('1.0', tk.END).strip()
                 last_fragment = self._get_last_fragment(text)
                 if last_fragment.startswith(('bench.', 'bc.')):
@@ -727,7 +887,9 @@ else:
                         self.suggestions_list.selection_clear(0, tk.END)
                         self.suggestions_list.selection_set(idx)
                         self.suggestions_list.see(idx)
-                    return 'break'
+                        return 'break'
+                self._history_up()
+                return 'break'
 
             def on_suggestion_down(self, event=None):
                 if self.suggestions_list.winfo_ismapped():
@@ -741,7 +903,9 @@ else:
                         self.suggestions_list.selection_clear(0, tk.END)
                         self.suggestions_list.selection_set(idx)
                         self.suggestions_list.see(idx)
-                    return 'break'
+                        return 'break'
+                self._history_down()
+                return 'break'
 
             def on_suggestion_clicked(self, event):
                 selection = self.suggestions_list.curselection()
@@ -784,6 +948,8 @@ else:
                     return
 
                 self.suggestions_list.pack_forget()
+                self._history_append(raw_text)
+                self._history_browse_index = None
                 commands = [cmd.strip() for cmd in re.split(r'[;\n\r]+', raw_text) if cmd.strip()]
                 for command in commands:
                     self._append_text(f'[{self._timestamp()}] You: {command}\n')
@@ -795,6 +961,24 @@ else:
                         args = command[5:].strip().split()
                         response = handle_help(args, self.registry)
                         self._append_text(f'\n{response}\n\n')
+                        continue
+
+                    plot_inner = try_extract_plot_command(command)
+                    if plot_inner is not None:
+                        parsed = self.parser.parse(plot_inner)
+                        if not parsed:
+                            self._append_error(
+                                'Error: plot(inner) needs a valid bench command, e.g. plot(bc.sg.measure frequency)\n\n')
+                            continue
+                        try:
+                            result = self.registry.execute(parsed['category'], parsed['action'], parsed['args'])
+                            self._append_text(f'Result: {result}\n')
+                            self._append_plot_from_data(result)
+                            self._append_text('\n')
+                        except ValueError as e:
+                            self._append_error(f'Error: {e}\n\n')
+                        except Exception as e:
+                            self._append_error(f'Error: {e}\n\n')
                         continue
 
                     parsed = self.parser.parse(command)
@@ -836,6 +1020,33 @@ else:
                 self.chat_display.insert('end', text, "error")
                 self.chat_display.configure(state='disabled')
                 self.chat_display.see('end')
+
+            def _append_plot_from_data(self, data):
+                try:
+                    png = render_plot_to_png_bytes(data)
+                except Exception as e:
+                    self._append_error(f'Plot error: {e}\n\n')
+                    return
+                try:
+                    from io import BytesIO
+                    from PIL import Image, ImageTk
+
+                    img = Image.open(BytesIO(png))
+                    max_w = max(320, min(720, self.root.winfo_width() - 80))
+                    if img.width > max_w:
+                        h = int(img.height * (max_w / img.width))
+                        img = img.resize((max_w, h), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    self.chat_display.configure(state='normal')
+                    self.chat_display.image_create('end', image=photo)
+                    self.chat_display.insert('end', '\n')
+                    if not hasattr(self, '_plot_photos'):
+                        self._plot_photos = []
+                    self._plot_photos.append(photo)
+                    self.chat_display.configure(state='disabled')
+                    self.chat_display.see('end')
+                except Exception as e:
+                    self._append_error(f'Plot error (image embed): {e}\n\n')
 
             def update_status_label(self):
                 simulate_dict = self.registry.config_manager.config.get('simulate', {})
@@ -889,10 +1100,15 @@ else:
                 try:
                     with open(filename, 'r', encoding='utf-8', errors='replace') as f:
                         content = f.read()
-                    self.input_line.delete('1.0', tk.END)
-                    self.input_line.insert('1.0', content.strip())
-                    self.input_line.see(tk.END)
-                    self.on_input_changed()
+                    self._history_browse_index = None
+                    self._history_setting_text = True
+                    try:
+                        self.input_line.delete('1.0', tk.END)
+                        self.input_line.insert('1.0', content.strip())
+                        self.input_line.see(tk.END)
+                        self.on_input_changed()
+                    finally:
+                        self._history_setting_text = False
                     self._append_text(f'Loaded script into command box: {filename}\n\n')
                 except Exception as e:
                     self._append_error(f'Error loading script: {e}\n\n')

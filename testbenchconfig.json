@@ -92,7 +92,11 @@
       "ip_address": "192.168.1.18",
       "port": 5025,
       "timeout_ms": 5000,
-      "description": "Programmable electronic load"
+      "description": "Programmable electronic load",
+      "protocol": "VISA",
+      "serial_port": "",
+      "baudrate": 9600,
+      "usb_resource": ""
     },
     "smu": {
       "name": "Source Measure Unit",
@@ -126,7 +130,7 @@
     }
   },
   "global_settings": {
-    "simulate_all": false,
+    "simulate_all": true,
     "connection_timeout_ms": 5000,
     "auto_connect": true,
     "log_level": "INFO",

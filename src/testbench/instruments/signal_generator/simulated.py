@@ -12,6 +12,7 @@ class SimulatedSignalGenerator(SignalGeneratorBase):
         'set_frequency': 'Set frequency (Hz)',
         'setAmplitude': 'Set amplitude (V)',
         'set_amplitude': 'Set amplitude (V)',
+        'measure': 'Read parameter (frequency|amplitude)',
     }
 
     def __init__(self, resource_name: Optional[str] = None):
@@ -121,5 +122,8 @@ class SimulatedSignalGenerator(SignalGeneratorBase):
             return self.set_frequency(float(args[0]))
         elif action in {'setAmplitude', 'set_amplitude'}:
             return self.set_amplitude(float(args[0]))
+        elif action == 'measure':
+            param = (args[0] if args else 'frequency').strip().lower()
+            return self.measure(param)
         else:
             raise ValueError(f"Unknown action: {action}")

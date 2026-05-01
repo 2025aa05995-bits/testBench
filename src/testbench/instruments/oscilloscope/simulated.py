@@ -1,4 +1,5 @@
-from typing import Dict, Any, Optional
+import math
+from typing import Dict, Any, Optional, List
 from .base import OscilloscopeBase
 
 
@@ -8,6 +9,7 @@ class SimulatedOscilloscope(OscilloscopeBase):
     ACTIONS = {
         'run': 'Start oscilloscope acquisition',
         'stop': 'Stop oscilloscope acquisition',
+        'get_trace': 'Return time_s and voltage_v arrays (channel [num_points])',
     }
 
     def __init__(self, resource_name: Optional[str] = None, num_channels: int = 4):
@@ -75,6 +77,31 @@ class SimulatedOscilloscope(OscilloscopeBase):
         print(
             f"[SIMULATED] CH{channel} {'enabled' if enabled else 'disabled'}")
 
+    def get_trace(self, channel: int = 1, num_points: int = 256) -> Dict[str, List[float]]:
+        """Simulated acquisition: time (s) vs voltage (V) for plotting."""
+        if not self.connected:
+            raise RuntimeError("Not connected")
+        if channel not in self._channel_settings:
+            raise ValueError(f"Invalid channel: {channel}")
+        if not self._running:
+            raise RuntimeError("Oscilloscope not running — use bench.osc.run first")
+        num_points = max(8, min(int(num_points), 8192))
+        # Horizontal span: 10 divisions at current timebase (seconds per division)
+        total_time = 10.0 * self._timebase
+        dt = total_time / (num_points - 1) if num_points > 1 else total_time
+        vdiv = self._channel_settings[channel]['volts_per_div']
+        offset = self._channel_settings[channel]['offset']
+        # Simulated 1 kHz sine, amplitude ~1 division peak
+        freq_hz = 1000.0
+        time_s: List[float] = []
+        voltage_v: List[float] = []
+        for i in range(num_points):
+            t = i * dt
+            v = vdiv * math.sin(2.0 * math.pi * freq_hz * t) + offset
+            time_s.append(t)
+            voltage_v.append(v)
+        return {'time_s': time_s, 'voltage_v': voltage_v}
+
     def capture_waveform(self, channel: int) -> Dict[str, Any]:
         if not self.connected:
             raise RuntimeError("Not connected")
@@ -123,5 +150,9 @@ class SimulatedOscilloscope(OscilloscopeBase):
             return self.run()
         elif action == 'stop':
             return self.stop()
+        elif action == 'get_trace':
+            ch = int(args[0]) if args else 1
+            n = int(args[1]) if len(args) > 1 else 256
+            return self.get_trace(ch, n)
         else:
             raise ValueError(f"Unknown action: {action}")
