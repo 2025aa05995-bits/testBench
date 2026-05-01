@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `testbenchconfig.json` file allows you to configure all instruments in the test bench with the following properties:
+The default file is `config/testbenchconfig.json` at the repository root. It configures all instruments in the test bench with the following properties:
 
 - **simulate**: Boolean flag to enable/disable simulation mode
 - **protocol**: Transport protocol for real instruments (e.g. `VISA`, `TCP/IP`, `Serial`)
@@ -48,8 +48,11 @@ The `testbenchconfig.json` file allows you to configure all instruments in the t
 ```python
 from testbench.config_manager import ConfigManager
 
-# Load configuration
-config = ConfigManager('testbenchconfig.json')
+# Load default configuration (config/testbenchconfig.json)
+config = ConfigManager()
+
+# Or pass an explicit path
+config = ConfigManager("config/my_lab.json")
 
 # Check if an instrument should be simulated
 if config.should_simulate('ps'):
@@ -81,6 +84,13 @@ ps_config = config.get_instrument_config('ps')
 all_instruments = config.get_all_instruments()
 
 # Get specific properties
+name = config.get_instrument_name('ps')
+type_name = config.get_instrument_type('ps')
+timeout = config.get_timeout('ps')
+
+# Get global settings
+log_level = config.get_global_setting('log_level', 'INFO')
+auto_connect = config.get_global_setting('auto_connect', True)
 ```
 
 ## Runtime instrument mode and discovery
@@ -96,16 +106,6 @@ The registry also supports runtime mode switching and device discovery via the `
 ```python
 config = ConfigManager()
 print(config.discover_available_devices())
-```
-
-### Get specific properties
-name = config.get_instrument_name('ps')
-type_name = config.get_instrument_type('ps')
-timeout = config.get_timeout('ps')
-
-# Get global settings
-log_level = config.get_global_setting('log_level', 'INFO')
-auto_connect = config.get_global_setting('auto_connect', True)
 ```
 
 ## Configuration Examples
@@ -196,21 +196,13 @@ auto_connect = config.get_global_setting('auto_connect', True)
 
 ## Integration with Command Registry
 
-The `CommandRegistry` can be updated to use `ConfigManager` to dynamically choose between simulated and real instruments:
-
 ```python
-from testbench.config_manager import ConfigManager
 from testbench.command_registry import CommandRegistry
 
-config = ConfigManager()
-registry = CommandRegistry(config)
-
-# Instruments will be created based on simulate flag
-if registry.should_simulate('ps'):
-    ps = SimulatedPowerSupply()
-else:
-    ps = RealPowerSupply(visa_resource=config.get_visa_resource('ps'))
+registry = CommandRegistry()
 ```
+
+Instruments are created from the loaded configuration (simulated vs real) inside the registry.
 
 ## Tips and Best Practices
 
@@ -218,16 +210,13 @@ else:
 2. **Use IP for Network Instruments**: For instruments with Ethernet, specify `ip_address` and `port`
 3. **Keep Defaults**: Leave `timeout_ms` at 5000 unless you have specific needs
 4. **Document Changes**: Keep comments in JSON explaining custom configurations
-5. **Version Control**: Track `testbenchconfig.json` in git for reproducible tests
-6. **Environment Specific**: Create different config files for different test environments:
-   - `testbenchconfig.dev.json` - Development (simulated)
-   - `testbenchconfig.test.json` - Test lab (real instruments)
-   - `testbenchconfig.prod.json` - Production (real instruments)
+5. **Version Control**: Track `config/testbenchconfig.json` in git for reproducible tests
+6. **Environment Specific**: Create different config files for different test environments (e.g. `config/testbenchconfig.dev.json`, `config/testbenchconfig.lab.json`)
 
 ## Troubleshooting
 
 ### ModuleNotFoundError when importing ConfigManager
-Add src to Python path:
+Add `src` to Python path:
 ```python
 import sys
 sys.path.insert(0, 'src')
@@ -235,15 +224,12 @@ from testbench.config_manager import ConfigManager
 ```
 
 ### Configuration file not found
-Ensure `testbenchconfig.json` is in the current working directory or provide the full path:
-```python
-config = ConfigManager('testbenchconfig.json')
-```
+By default the app loads `config/testbenchconfig.json` relative to the repository root. You can pass a full path to `ConfigManager` or use **Load Config** in the GUI.
 
 ### Invalid JSON
 Validate your JSON using:
 - Online JSON validator: https://jsonlint.com/
-- Python: `python -m json.tool testbenchconfig.json`
+- Python: `python -m json.tool config/testbenchconfig.json`
 
 ### Connection timeouts
 Increase `timeout_ms` in the configuration for slow instruments:

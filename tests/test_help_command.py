@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Quick test script to verify help command and command execution."""
 
-from testbench.command_registry import CommandRegistry
-from command_parser import CommandParser, handle_help
 import sys
-import os
+from pathlib import Path
 
-# Add src directory to path FIRST
-sys.path.insert(0, 'src')
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'src'))
+
+from testbench.command_parser import CommandParser, handle_help  # noqa: E402
+from testbench.command_registry import CommandRegistry  # noqa: E402
 
 
 def test_help_command():

@@ -12,7 +12,7 @@ pip install -r requirements.txt
 ### 2. Run Tasks (Ctrl+Shift+P > Tasks: Run Task)
 - **Install dependencies** - Installs all required packages
 - **Run GUI Chat** - Launches the PyQt5 GUI chat interface
-- **Run Bench CLI** - Runs the benchmark CLI tool
+- **Run Bench CLI** - Runs the sample bench script under `scripts/`
 - **Run Tests** - Executes all pytest tests
 - **Test Simulated Instruments** - Tests the instrument simulation layer
 - **Format Code** - Formats code using black
@@ -46,14 +46,17 @@ VS Code will prompt you to install recommended extensions:
 testBench/
 ├── .vscode/           # VS Code configuration
 ├── .venv/             # Python virtual environment
+├── config/            # Default testbenchconfig.json
+├── docs/              # Configuration and other docs
+├── scripts/           # Runnable utilities (e.g. bench demo)
 ├── src/
-│   └── testbench/     # Main package
-│       ├── instruments/  # 12 simulated instruments
+│   └── testbench/     # Main package (registry, config, parsing, plotting)
+│       ├── instruments/
+│       ├── command_parser.py
+│       ├── chat_plotting.py
 │       └── command_registry.py
-├── tests/             # Test directory
-├── gui_chat.py        # PyQt5/tkinter chat interface
-├── bench.py           # CLI tool
-├── command_parser.py  # Command parsing
+├── tests/             # Pytest and manual test scripts
+├── gui_chat.py        # PyQt5/tkinter chat interface (repo root entry)
 └── requirements.txt   # Dependencies
 ```
 
@@ -69,7 +72,7 @@ python gui_chat.py
 ### Running Tests
 ```bash
 # Using VS Code task or:
-pytest -v
+pytest -v tests
 ```
 
 ### Available Commands

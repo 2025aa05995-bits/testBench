@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Test autocomplete functionality."""
 
-from gui_chat import CommandCompleter
-from testbench.command_registry import CommandRegistry
-from command_parser import CommandParser, handle_help
 import sys
-sys.path.insert(0, 'src')
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'src'))
+
+from gui_chat import CommandCompleter  # noqa: E402
+from testbench.command_registry import CommandRegistry  # noqa: E402
 
 
 def test_autocomplete():

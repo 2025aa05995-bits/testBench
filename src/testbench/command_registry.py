@@ -1,6 +1,8 @@
 """Central registry for all available instrument commands."""
 
 from typing import Any, Dict, List, Optional
+
+from ._paths import default_config_file
 from .config_manager import ConfigManager
 from .instruments import (
     RealInstrumentAdapter,
@@ -24,7 +26,7 @@ class ConfigInterface:
     """Configuration command helper for runtime toggles and discovery."""
 
     ACTIONS = {
-        'reload': 'Reload configuration from testbenchconfig.json',
+        'reload': 'Reload configuration from config file',
         'show': 'Show the current configuration and instrument modes',
         'discover': 'Discover available VISA, serial, and TCP/IP devices',
         'set_simulation': 'Toggle simulation/real mode for an instrument',
@@ -108,9 +110,10 @@ class CommandRegistry:
         'pm': SimulatedPowerMeter,
     }
 
-    def __init__(self, config_file: str = 'testbenchconfig.json'):
+    def __init__(self, config_file: Optional[str] = None):
         """Initialize the registry with all available instruments."""
-        self.config_manager = ConfigManager(config_file)
+        path = str(default_config_file()) if config_file is None else config_file
+        self.config_manager = ConfigManager(path)
         self.instruments = self._build_instruments()
         self.instruments['config'] = ConfigInterface(self.config_manager, self)
         self._auto_connect_instruments()

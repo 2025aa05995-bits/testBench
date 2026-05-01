@@ -7,9 +7,22 @@ from datetime import datetime
 # Add src directory to path BEFORE importing testbench modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from command_parser import CommandParser, handle_help
+from testbench.chat_plotting import try_extract_plot_command, render_plot_to_png_bytes
+from testbench.command_parser import CommandParser, handle_help
 from testbench.command_registry import CommandRegistry
-from chat_plotting import try_extract_plot_command, render_plot_to_png_bytes
+from testbench._paths import default_config_file, repo_root
+
+_CONFIG_DIALOG_START = str(repo_root() / 'config')
+
+
+def try_parse_quoted_heading(command: str):
+    """Heading only when the whole line is wrapped in double quotes, e.g. ``\"Power Cycle Test\"``."""
+    s = (command or "").strip()
+    m = re.match(r'^"(.*)"\s*$', s, re.DOTALL)
+    if not m:
+        return None
+    inner = (m.group(1) or "").strip()
+    return inner if inner else None
 
 
 class CommandCompleter:
@@ -46,6 +59,72 @@ class CommandCompleter:
         return suggestions[:max_suggestions]
 
 
+def run_chat_command(
+    command: str,
+    registry,
+    parser,
+    append_text,
+    append_error,
+    append_heading,
+    append_plot_from_data,
+) -> None:
+    """Run a single user command: help, quoted heading, plot(...), or bench/bc."""
+    cmd = (command or "").strip()
+    if not cmd:
+        return
+    if cmd.lower() == "help":
+        response = handle_help([], registry)
+        append_text(f"\n{response}\n\n")
+        return
+    if cmd.lower().startswith("help "):
+        args = cmd[5:].strip().split()
+        response = handle_help(args, registry)
+        append_text(f"\n{response}\n\n")
+        return
+
+    title = try_parse_quoted_heading(cmd)
+    if title is not None:
+        append_heading(title)
+        return
+
+    plot_inner = try_extract_plot_command(cmd)
+    if plot_inner is not None:
+        parsed = parser.parse(plot_inner)
+        if not parsed:
+            append_error(
+                "Error: plot(inner) needs a valid bench command, e.g. plot(bc.sg.measure frequency)\n\n"
+            )
+            return
+        try:
+            result = registry.execute(parsed["category"], parsed["action"], parsed["args"])
+            append_text(f"Result: {result}\n")
+            append_plot_from_data(result)
+            append_text("\n")
+        except ValueError as e:
+            append_error(f"Error: {e}\n\n")
+        except Exception as e:
+            append_error(f"Error: {e}\n\n")
+        return
+
+    parsed = parser.parse(cmd)
+    if not parsed:
+        append_error(
+            "Error: Invalid command format. Expected: bench.<category>.<action> or bc.<category>.<action> [args...]\n"
+        )
+        append_error("       Example: bench.ps.on True or bc.ps.on True\n")
+        append_error("       Type 'help' for all available commands\n\n")
+        return
+
+    try:
+        result = registry.execute(parsed["category"], parsed["action"], parsed["args"])
+        response = "OK" if result is None else str(result)
+        append_text(f"Result: {response}\n\n")
+    except ValueError as e:
+        append_error(f"Error: {e}\n\n")
+    except Exception as e:
+        append_error(f"Error: {e}\n\n")
+
+
 try:
     from PyQt5.QtWidgets import (
         QApplication,
@@ -67,8 +146,8 @@ try:
         QSpinBox,
         QMessageBox,
     )
-    from PyQt5.QtCore import Qt, QEvent
-    from PyQt5.QtGui import QGuiApplication, QImage, QTextCursor, QTextCharFormat
+    from PyQt5.QtCore import Qt, QEvent, QTimer
+    from PyQt5.QtGui import QFont, QGuiApplication, QImage, QPalette, QTextCursor, QTextCharFormat
     PYQT_AVAILABLE = True
 except ImportError:
     PYQT_AVAILABLE = False
@@ -166,7 +245,7 @@ if PYQT_AVAILABLE:
                 QPushButton:hover { background: #f5f5f5; }
                 QPushButton:pressed { background: #eeeeee; }
             """)
-            self.send_button.clicked.connect(self.send_command)
+            self.send_button.clicked.connect(self._on_send_or_stop_clicked)
             action_col.addWidget(self.send_button, 0, Qt.AlignRight)
 
             composer_row.addLayout(action_col)
@@ -190,6 +269,13 @@ if PYQT_AVAILABLE:
             self._history_browse_index = None
             self._history_setting_text = False
 
+            self._sequence_active = False
+            self._sequence_queue = []
+            self._sequence_index = 0
+            self._delay_timer = QTimer(self)
+            self._delay_timer.setSingleShot(True)
+            self._delay_timer.timeout.connect(self._on_delay_timer_done)
+
             self.status_bar = self.statusBar()
             self.update_status_bar()
 
@@ -204,7 +290,88 @@ if PYQT_AVAILABLE:
                 "plot(bc.osc.get_trace 1) after bc.osc.run — time vs voltage.\n"
             )
             self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
+            self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
+            self._append_text('Delay: use delay 10 to wait 10 seconds before the next command; Send becomes Stop.\n')
             self._append_text('=' * 60 + '\n\n')
+
+        def _set_run_button_sequence_mode(self, running: bool) -> None:
+            if running:
+                self.send_button.setText('Stop')
+                self.send_button.setToolTip('Stop sequence')
+            else:
+                self.send_button.setText('▶')
+                self.send_button.setToolTip('Send')
+
+        def _on_send_or_stop_clicked(self) -> None:
+            if self._sequence_active:
+                self._delay_timer.stop()
+                self._append_text('Sequence stopped.\n\n')
+                self._finish_sequence()
+            else:
+                self.send_command()
+
+        def _finish_sequence(self) -> None:
+            self._delay_timer.stop()
+            self._sequence_active = False
+            self._sequence_queue = []
+            self._sequence_index = 0
+            self._set_run_button_sequence_mode(False)
+            self.update_status_bar()
+
+        def _on_delay_timer_done(self) -> None:
+            if self._sequence_active:
+                self._run_next_sequence_step()
+
+        def _start_command_sequence(self, commands: list) -> None:
+            self._sequence_active = True
+            self._sequence_queue = list(commands)
+            self._sequence_index = 0
+            self._set_run_button_sequence_mode(True)
+            self._run_next_sequence_step()
+
+        def _run_next_sequence_step(self) -> None:
+            if not self._sequence_active:
+                return
+            if self._sequence_index >= len(self._sequence_queue):
+                self._finish_sequence()
+                return
+            command = self._sequence_queue[self._sequence_index]
+            self._sequence_index += 1
+            self._append_text(f'[{self._timestamp()}] You: {command}\n')
+
+            parts = command.strip().split(None, 1)
+            if parts and parts[0].lower() == 'delay':
+                if len(parts) < 2:
+                    self._append_error('Usage: delay <seconds>\n\n')
+                    QTimer.singleShot(0, self._run_next_sequence_step)
+                    return
+                try:
+                    sec = float(parts[1].strip())
+                except ValueError:
+                    self._append_error(f'Invalid delay value: {parts[1]!r}\n\n')
+                    QTimer.singleShot(0, self._run_next_sequence_step)
+                    return
+                if sec < 0:
+                    self._append_error('Delay must be non-negative.\n\n')
+                    QTimer.singleShot(0, self._run_next_sequence_step)
+                    return
+                ms = int(min(sec * 1000.0, 86400000))
+                ms = max(ms, 0)
+                self._delay_timer.start(ms)
+                return
+
+            run_chat_command(
+                command,
+                self.registry,
+                self.parser,
+                self._append_text,
+                self._append_error,
+                self._append_heading,
+                self._append_plot_from_data,
+            )
+            if not self._sequence_active:
+                return
+            QTimer.singleShot(0, self._run_next_sequence_step)
 
         def _history_append(self, text: str) -> None:
             t = (text or "").strip()
@@ -283,6 +450,9 @@ if PYQT_AVAILABLE:
 
         def eventFilter(self, obj, event):
             if obj is self.input_line and event.type() == QEvent.KeyPress:
+                if event.key() in {Qt.Key_Return, Qt.Key_Enter}:
+                    if self._sequence_active and not (event.modifiers() & Qt.ShiftModifier):
+                        return True
                 if event.key() in {Qt.Key_Up, Qt.Key_Down} and self.suggestions_list.isVisible():
                     count = self.suggestions_list.count()
                     if count > 0:
@@ -346,6 +516,8 @@ if PYQT_AVAILABLE:
             self._apply_suggestion(item.text())
 
         def send_command(self):
+            if self._sequence_active:
+                return
             raw_text = self.input_line.toPlainText().strip()
             if not raw_text:
                 return
@@ -354,59 +526,47 @@ if PYQT_AVAILABLE:
             self._history_append(raw_text)
             self._history_browse_index = None
             commands = [cmd.strip() for cmd in re.split(r'[;\n\r]+', raw_text) if cmd.strip()]
-            for command in commands:
-                self._append_text(f'[{self._timestamp()}] You: {command}\n')
-                if command.lower() == 'help':
-                    response = handle_help([], self.registry)
-                    self._append_text(f'\n{response}\n\n')
-                    continue
-                elif command.lower().startswith('help '):
-                    args = command[5:].strip().split()
-                    response = handle_help(args, self.registry)
-                    self._append_text(f'\n{response}\n\n')
-                    continue
-
-                plot_inner = try_extract_plot_command(command)
-                if plot_inner is not None:
-                    parsed = self.parser.parse(plot_inner)
-                    if not parsed:
-                        self._append_error(
-                            'Error: plot(inner) needs a valid bench command, e.g. plot(bc.sg.measure frequency)\n\n')
-                        continue
-                    try:
-                        result = self.registry.execute(parsed['category'], parsed['action'], parsed['args'])
-                        self._append_text(f'Result: {result}\n')
-                        self._append_plot_from_data(result)
-                        self._append_text('\n')
-                    except ValueError as e:
-                        self._append_error(f'Error: {e}\n\n')
-                    except Exception as e:
-                        self._append_error(f'Error: {e}\n\n')
-                    continue
-
-                parsed = self.parser.parse(command)
-                if not parsed:
-                    self._append_error(
-                        'Error: Invalid command format. Expected: bench.<category>.<action> or bc.<category>.<action> [args...]\n')
-                    self._append_error('       Example: bench.ps.on True or bc.ps.on True\n')
-                    self._append_error('       Type \'help\' for all available commands\n\n')
-                    continue
-
-                try:
-                    result = self.registry.execute(parsed['category'], parsed['action'], parsed['args'])
-                    response = 'OK' if result is None else str(result)
-                    self._append_text(f'Result: {response}\n\n')
-                except ValueError as e:
-                    self._append_error(f'Error: {e}\n\n')
-                except Exception as e:
-                    self._append_error(f'Error: {e}\n\n')
-
             self.input_line.clear()
             self.update_status_bar()
+            if not commands:
+                return
+            self._start_command_sequence(commands)
+
+        def _default_char_format(self) -> QTextCharFormat:
+            fmt = QTextCharFormat()
+            fmt.setForeground(self.chat_display.palette().color(QPalette.Active, QPalette.Text))
+            return fmt
 
         def _append_text(self, text: str):
-            self.chat_display.append(text)
-            self.chat_display.moveCursor(QTextCursor.End)
+            cursor = self.chat_display.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            cursor.setCharFormat(self._default_char_format())
+            cursor.insertText(text)
+            self.chat_display.setTextCursor(cursor)
+            self.chat_display.ensureCursorVisible()
+
+        def _append_heading(self, title: str) -> None:
+            title = (title or "").strip()
+            if not title:
+                return
+            cursor = self.chat_display.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            hf = QTextCharFormat()
+            f = QFont(self.chat_display.font())
+            f.setBold(True)
+            f.setUnderline(True)
+            pt = f.pointSize()
+            if pt <= 0:
+                pt = self.chat_display.fontInfo().pointSize() or 10
+            f.setPointSize(pt + 2)
+            hf.setFont(f)
+            hf.setForeground(self.chat_display.palette().color(QPalette.Active, QPalette.Text))
+            cursor.setCharFormat(hf)
+            cursor.insertText(title + "\n")
+            cursor.setCharFormat(self._default_char_format())
+            line = "─" * min(72, max(24, len(title)))
+            cursor.insertText(line + "\n\n")
+            self.chat_display.setTextCursor(cursor)
             self.chat_display.ensureCursorVisible()
 
         def clear_screen(self):
@@ -421,6 +581,7 @@ if PYQT_AVAILABLE:
             char_format = QTextCharFormat()
             char_format.setForeground(Qt.red)
             cursor.insertText(text, char_format)
+            cursor.setCharFormat(self._default_char_format())
             self.chat_display.setTextCursor(cursor)
             self.chat_display.ensureCursorVisible()
 
@@ -440,6 +601,7 @@ if PYQT_AVAILABLE:
             cursor = self.chat_display.textCursor()
             cursor.movePosition(QTextCursor.End)
             cursor.insertImage(qimg)
+            cursor.setCharFormat(self._default_char_format())
             cursor.insertText('\n')
             self.chat_display.setTextCursor(cursor)
             self.chat_display.ensureCursorVisible()
@@ -467,7 +629,7 @@ if PYQT_AVAILABLE:
             filename, _ = QFileDialog.getOpenFileName(
                 self,
                 'Load Config',
-                '',
+                _CONFIG_DIALOG_START,
                 'JSON Files (*.json);;All Files (*)'
             )
             if not filename:
@@ -521,7 +683,7 @@ if PYQT_AVAILABLE:
             dialog.resize(720, 520)
 
             layout = QVBoxLayout(dialog)
-            path = getattr(cfg_mgr, 'config_file', 'testbenchconfig.json')
+            path = getattr(cfg_mgr, 'config_file', str(default_config_file()))
             layout.addWidget(QLabel(f'Config: {path}'))
 
             top_row = QHBoxLayout()
@@ -684,6 +846,7 @@ if PYQT_AVAILABLE:
 else:
     try:
         import tkinter as tk
+        import tkinter.font as tkfont
         from tkinter.scrolledtext import ScrolledText
         from tkinter import filedialog
         from tkinter import messagebox
@@ -728,6 +891,16 @@ else:
                 self.chat_display = ScrolledText(self.root, state='disabled', wrap='word')
                 self.chat_display.pack(fill='both', expand=True, padx=8, pady=8)
                 self.chat_display.tag_configure("error", foreground="red")
+                _base_tf = tkfont.nametofont("TkTextFont")
+                _act = _base_tf.actual()
+                self._heading_font = tkfont.Font(
+                    self.root,
+                    family=_act["family"],
+                    size=_act["size"] + 2,
+                    weight="bold",
+                    underline=True,
+                )
+                self.chat_display.tag_configure("heading", font=self._heading_font)
 
                 self.input_frame = tk.Frame(self.root)
                 self.input_frame.pack(fill='x', padx=8, pady=(0, 0))
@@ -748,7 +921,9 @@ else:
                 self.clear_button = tk.Button(self.action_frame, text='✕', command=self.clear_screen, width=3, height=1)
                 self.clear_button.pack(side='top', pady=(0, 6))
 
-                self.send_button = tk.Button(self.action_frame, text='▶', command=self.send_command, width=3, height=2)
+                self.send_button = tk.Button(
+                    self.action_frame, text='▶', command=self._on_send_or_stop_clicked, width=4, height=2
+                )
                 self.send_button.pack(side='top')
 
                 self.suggestions_frame = tk.Frame(self.root)
@@ -773,6 +948,12 @@ else:
                 self._history_browse_index = None
                 self._history_setting_text = False
 
+                self._sequence_active = False
+                self._sequence_queue = []
+                self._sequence_index = 0
+                self._delay_after_id = None
+                self._pending_step_after_id = None
+
                 self._append_text('Lab Automation Chat\n')
                 self._append_text("Type 'help' for available commands\n")
                 self._append_text("Type 'bench.' or 'bc.' to see command suggestions\n")
@@ -784,9 +965,108 @@ else:
                     "plot(bc.osc.get_trace 1) after bc.osc.run — time vs voltage.\n"
                 )
                 self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
+                self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
+                self._append_text('Delay: use delay 10 to wait 10 seconds before the next command; Send becomes Stop.\n')
                 self._append_text('=' * 60 + '\n\n')
 
                 self.update_status_label()
+
+            def _set_run_button_sequence_mode(self, running: bool) -> None:
+                if running:
+                    self.send_button.config(text='Stop')
+                else:
+                    self.send_button.config(text='▶')
+
+            def _cancel_after_id(self, attr: str) -> None:
+                aid = getattr(self, attr, None)
+                if aid is not None:
+                    try:
+                        self.root.after_cancel(aid)
+                    except Exception:
+                        pass
+                    setattr(self, attr, None)
+
+            def _cancel_all_sequence_timers(self) -> None:
+                self._cancel_after_id('_delay_after_id')
+                self._cancel_after_id('_pending_step_after_id')
+
+            def _on_send_or_stop_clicked(self) -> None:
+                if self._sequence_active:
+                    self._cancel_all_sequence_timers()
+                    self._append_text('Sequence stopped.\n\n')
+                    self._finish_sequence()
+                else:
+                    self.send_command()
+
+            def _finish_sequence(self) -> None:
+                self._cancel_all_sequence_timers()
+                self._sequence_active = False
+                self._sequence_queue = []
+                self._sequence_index = 0
+                self._set_run_button_sequence_mode(False)
+                self.update_status_label()
+
+            def _schedule_next_sequence_step(self, delay_ms: int = 0) -> None:
+                self._cancel_after_id('_pending_step_after_id')
+                self._pending_step_after_id = self.root.after(delay_ms, self._run_next_sequence_step)
+
+            def _on_delay_elapsed(self) -> None:
+                self._delay_after_id = None
+                if self._sequence_active:
+                    self._run_next_sequence_step()
+
+            def _start_command_sequence(self, commands: list) -> None:
+                self._sequence_active = True
+                self._sequence_queue = list(commands)
+                self._sequence_index = 0
+                self._set_run_button_sequence_mode(True)
+                self._run_next_sequence_step()
+
+            def _run_next_sequence_step(self) -> None:
+                self._pending_step_after_id = None
+                if not self._sequence_active:
+                    return
+                if self._sequence_index >= len(self._sequence_queue):
+                    self._finish_sequence()
+                    return
+                command = self._sequence_queue[self._sequence_index]
+                self._sequence_index += 1
+                self._append_text(f'[{self._timestamp()}] You: {command}\n')
+
+                parts = command.strip().split(None, 1)
+                if parts and parts[0].lower() == 'delay':
+                    if len(parts) < 2:
+                        self._append_error('Usage: delay <seconds>\n\n')
+                        self._schedule_next_sequence_step(0)
+                        return
+                    try:
+                        sec = float(parts[1].strip())
+                    except ValueError:
+                        self._append_error(f'Invalid delay value: {parts[1]!r}\n\n')
+                        self._schedule_next_sequence_step(0)
+                        return
+                    if sec < 0:
+                        self._append_error('Delay must be non-negative.\n\n')
+                        self._schedule_next_sequence_step(0)
+                        return
+                    ms = int(min(sec * 1000.0, 86400000))
+                    ms = max(ms, 0)
+                    self._cancel_after_id('_delay_after_id')
+                    self._delay_after_id = self.root.after(ms, self._on_delay_elapsed)
+                    return
+
+                run_chat_command(
+                    command,
+                    self.registry,
+                    self.parser,
+                    self._append_text,
+                    self._append_error,
+                    self._append_heading,
+                    self._append_plot_from_data,
+                )
+                if not self._sequence_active:
+                    return
+                self._schedule_next_sequence_step(0)
 
             def _history_append(self, text: str) -> None:
                 t = (text or "").strip()
@@ -933,6 +1213,8 @@ else:
                 if event.state & 0x0001:
                     self.input_line.insert('insert', '\n')
                     return 'break'
+                if self._sequence_active:
+                    return 'break'
                 if self.suggestions_list.winfo_ismapped():
                     selection = self.suggestions_list.curselection()
                     if selection:
@@ -943,6 +1225,8 @@ else:
                 return 'break'
 
             def send_command(self):
+                if self._sequence_active:
+                    return
                 raw_text = self.input_line.get('1.0', tk.END).strip()
                 if not raw_text:
                     return
@@ -951,59 +1235,26 @@ else:
                 self._history_append(raw_text)
                 self._history_browse_index = None
                 commands = [cmd.strip() for cmd in re.split(r'[;\n\r]+', raw_text) if cmd.strip()]
-                for command in commands:
-                    self._append_text(f'[{self._timestamp()}] You: {command}\n')
-                    if command.lower() == 'help':
-                        response = handle_help([], self.registry)
-                        self._append_text(f'\n{response}\n\n')
-                        continue
-                    elif command.lower().startswith('help '):
-                        args = command[5:].strip().split()
-                        response = handle_help(args, self.registry)
-                        self._append_text(f'\n{response}\n\n')
-                        continue
-
-                    plot_inner = try_extract_plot_command(command)
-                    if plot_inner is not None:
-                        parsed = self.parser.parse(plot_inner)
-                        if not parsed:
-                            self._append_error(
-                                'Error: plot(inner) needs a valid bench command, e.g. plot(bc.sg.measure frequency)\n\n')
-                            continue
-                        try:
-                            result = self.registry.execute(parsed['category'], parsed['action'], parsed['args'])
-                            self._append_text(f'Result: {result}\n')
-                            self._append_plot_from_data(result)
-                            self._append_text('\n')
-                        except ValueError as e:
-                            self._append_error(f'Error: {e}\n\n')
-                        except Exception as e:
-                            self._append_error(f'Error: {e}\n\n')
-                        continue
-
-                    parsed = self.parser.parse(command)
-                    if not parsed:
-                        self._append_error(
-                            'Error: Invalid command format. Expected: bench.<category>.<action> or bc.<category>.<action> [args...]\n')
-                        self._append_error('       Example: bench.ps.on True or bc.ps.on True\n')
-                        self._append_error('       Type \'help\' for all available commands\n\n')
-                        continue
-
-                    try:
-                        result = self.registry.execute(parsed['category'], parsed['action'], parsed['args'])
-                        response = 'OK' if result is None else str(result)
-                        self._append_text(f'Result: {response}\n\n')
-                    except ValueError as e:
-                        self._append_error(f'Error: {e}\n\n')
-                    except Exception as e:
-                        self._append_error(f'Error: {e}\n\n')
-
                 self.input_line.delete('1.0', tk.END)
                 self.update_status_label()
+                if not commands:
+                    return
+                self._start_command_sequence(commands)
 
             def _append_text(self, text: str):
                 self.chat_display.configure(state='normal')
                 self.chat_display.insert('end', text)
+                self.chat_display.configure(state='disabled')
+                self.chat_display.see('end')
+
+            def _append_heading(self, title: str) -> None:
+                title = (title or "").strip()
+                if not title:
+                    return
+                self.chat_display.configure(state='normal')
+                self.chat_display.insert('end', title + '\n', 'heading')
+                line = '─' * min(72, max(24, len(title)))
+                self.chat_display.insert('end', line + '\n\n')
                 self.chat_display.configure(state='disabled')
                 self.chat_display.see('end')
 
@@ -1070,6 +1321,7 @@ else:
             def load_config(self):
                 filename = filedialog.askopenfilename(
                     title='Load Config',
+                    initialdir=_CONFIG_DIALOG_START,
                     filetypes=[('JSON Files', '*.json'), ('All Files', '*.*')]
                 )
                 if not filename:
@@ -1115,10 +1367,10 @@ else:
 
             def open_bench_settings(self):
                 top = tk.Toplevel(self.root)
-                top.title('Bench Settings (testbenchconfig.json)')
+                top.title('Bench Settings')
                 top.geometry('700x500')
 
-                path = getattr(self.registry.config_manager, 'config_file', 'testbenchconfig.json')
+                path = getattr(self.registry.config_manager, 'config_file', str(default_config_file()))
                 tk.Label(top, text=f'Editing: {path}', anchor='w').pack(fill='x', padx=8, pady=(8, 4))
 
                 editor = ScrolledText(top, wrap='word')

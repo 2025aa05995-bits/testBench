@@ -30,7 +30,7 @@
       "label": "Run Bench CLI",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/python.exe",
-      "args": ["bench.py"],
+      "args": ["scripts/bench.py"],
       "problemMatcher": [],
       "group": "run",
       "presentation": {
@@ -41,7 +41,7 @@
       "label": "Run Tests",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/pytest.exe",
-      "args": ["-v", "--tb=short"],
+      "args": ["-v", "--tb=short", "tests"],
       "problemMatcher": [],
       "group": "test",
       "presentation": {
@@ -52,7 +52,7 @@
       "label": "Test Simulated Instruments",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/python.exe",
-      "args": ["test_simulated_instruments.py"],
+      "args": ["tests/test_simulated_instruments.py"],
       "problemMatcher": [],
       "group": "test",
       "presentation": {
@@ -63,7 +63,7 @@
       "label": "Run Tests with Coverage",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/pytest.exe",
-      "args": ["--cov=src/testbench", "--cov-report=html", "-v"],
+      "args": ["--cov=src/testbench", "--cov-report=html", "-v", "tests"],
       "problemMatcher": [],
       "group": "test",
       "presentation": {
@@ -74,7 +74,7 @@
       "label": "Format Code (black)",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/black.exe",
-      "args": ["src", "*.py"],
+      "args": ["src", "gui_chat.py", "scripts", "tests"],
       "problemMatcher": [],
       "group": "none",
       "presentation": {
@@ -85,7 +85,7 @@
       "label": "Lint Code (flake8)",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/flake8.exe",
-      "args": ["src", "*.py", "--max-line-length=120", "--ignore=E203,W503"],
+      "args": ["src", "gui_chat.py", "scripts", "tests", "--max-line-length=120", "--ignore=E203,W503"],
       "problemMatcher": [],
       "group": "none",
       "presentation": {

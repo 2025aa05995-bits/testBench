@@ -4,17 +4,19 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
+from ._paths import default_config_file
+
 
 class ConfigManager:
-    """Manages instrument configuration from testbenchconfig.json."""
+    """Manages instrument configuration from ``config/testbenchconfig.json`` by default."""
 
-    def __init__(self, config_file: str = "testbenchconfig.json"):
+    def __init__(self, config_file: Optional[str] = None):
         """Initialize the config manager.
 
         Args:
-            config_file: Path to the configuration JSON file
+            config_file: Path to the configuration JSON file (default: repo ``config/testbenchconfig.json``)
         """
-        self.config_file = config_file
+        self.config_file = str(default_config_file()) if config_file is None else config_file
         self.config: Dict[str, Any] = {}
         self.load_config()
 

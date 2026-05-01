@@ -27,7 +27,7 @@
       "name": "Python: Bench CLI",
       "type": "python",
       "request": "launch",
-      "program": "${workspaceFolder}/bench.py",
+      "program": "${workspaceFolder}/scripts/bench.py",
       "console": "integratedTerminal",
       "justMyCode": true,
       "env": {
@@ -41,7 +41,8 @@
       "module": "pytest",
       "args": [
         "-v",
-        "--tb=short"
+        "--tb=short",
+        "tests"
       ],
       "console": "integratedTerminal",
       "justMyCode": true,
@@ -53,7 +54,7 @@
       "name": "Python: Test Simulated Instruments",
       "type": "python",
       "request": "launch",
-      "program": "${workspaceFolder}/test_simulated_instruments.py",
+      "program": "${workspaceFolder}/tests/test_simulated_instruments.py",
       "console": "integratedTerminal",
       "justMyCode": true,
       "env": {

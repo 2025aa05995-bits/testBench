@@ -1,10 +1,14 @@
 """Test script for simulated instruments."""
 
-from testbench.instruments.signal_generator.simulated import SimulatedSignalGenerator
-from testbench.instruments.oscilloscope.simulated import SimulatedOscilloscope
-from testbench.instruments.power_supply.simulated import SimulatedPowerSupply
 import sys
-sys.path.insert(0, 'src')
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / 'src'))
+
+from testbench.instruments.signal_generator.simulated import SimulatedSignalGenerator  # noqa: E402
+from testbench.instruments.oscilloscope.simulated import SimulatedOscilloscope  # noqa: E402
+from testbench.instruments.power_supply.simulated import SimulatedPowerSupply  # noqa: E402
 
 
 def test_power_supply():
