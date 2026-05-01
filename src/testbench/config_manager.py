@@ -18,8 +18,15 @@ class ConfigManager:
         self.config: Dict[str, Any] = {}
         self.load_config()
 
-    def load_config(self) -> None:
-        """Load configuration from JSON file."""
+    def load_config(self, config_file: Optional[str] = None) -> None:
+        """Load configuration from JSON file.
+
+        Args:
+            config_file: Optional path to a configuration JSON file. If provided,
+                the manager will switch to that file and load from it.
+        """
+        if config_file:
+            self.config_file = config_file
         if not os.path.exists(self.config_file):
             raise FileNotFoundError(f"Configuration file not found: {self.config_file}")
 
@@ -98,6 +105,13 @@ class ConfigManager:
             return instrument.get('ip_address')
         return None
 
+    def get_port(self, category: str, default: int = 5025) -> int:
+        """Get TCP/IP port for an instrument."""
+        instrument = self.get_instrument_config(category)
+        if instrument:
+            return int(instrument.get('port', default))
+        return int(default)
+
     def get_instrument_type(self, category: str) -> Optional[str]:
         """Get instrument type.
 
@@ -161,8 +175,8 @@ class ConfigManager:
         except ImportError:
             return []
 
-        manager = pyvisa.ResourceManager()
         try:
+            manager = pyvisa.ResourceManager()
             return list(manager.list_resources())
         except Exception:
             return []

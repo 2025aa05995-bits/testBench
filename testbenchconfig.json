@@ -8,7 +8,11 @@
       "ip_address": "192.168.1.10",
       "port": 5025,
       "timeout_ms": 5000,
-      "description": "Programmable DC power supply"
+      "description": "Programmable DC power supply",
+      "protocol": "VISA",
+      "serial_port": "",
+      "baudrate": 9600,
+      "usb_resource": ""
     },
     "osc": {
       "name": "Oscilloscope",
