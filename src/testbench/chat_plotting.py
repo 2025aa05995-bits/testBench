@@ -15,11 +15,18 @@ except ImportError:
 
 
 def try_extract_plot_command(command: str) -> Optional[str]:
-    """If command is ``plot(inner)``, return *inner* stripped; else None."""
-    m = re.match(r"^\s*plot\s*\(\s*(.+)\s*\)\s*$", command.strip(), re.IGNORECASE | re.DOTALL)
-    if not m:
+    """If command is ``plot(...)`` or ``plot <bench command>``, return the bench command stripped."""
+    s = command.strip()
+    if not s:
         return None
-    return m.group(1).strip()
+    # Parentheses form first so ``plot ( bc.x )`` is not treated as space form.
+    m = re.match(r"^\s*plot\s*\(\s*(.+)\s*\)\s*$", s, re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    m2 = re.match(r"(?i)^plot\s+(.+)$", s)
+    if m2:
+        return m2.group(1).strip()
+    return None
 
 
 def _as_float_list(seq: Any) -> List[float]:

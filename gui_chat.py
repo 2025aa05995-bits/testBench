@@ -3,6 +3,7 @@ import sys
 import os
 import json
 from datetime import datetime
+from functools import partial
 
 # Add src directory to path BEFORE importing testbench modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -13,6 +14,75 @@ from testbench.command_registry import CommandRegistry
 from testbench._paths import default_config_file, repo_root
 
 _CONFIG_DIALOG_START = str(repo_root() / 'config')
+
+# Built-in power-cycle example: on, wait 1s, off (matches menu "Power cycle test" example).
+_EXAMPLE_POWER_CYCLE_COMMANDS = ['bc.ps.on', 'delay 1', 'bc.ps.off']
+
+
+def _test_sequences_file() -> str:
+    return str(repo_root() / 'config' / 'test_sequences.json')
+
+
+def _normalize_sequence_name_map(raw: object) -> dict:
+    """Normalize { sequence_name: [command, ...] }."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        if not isinstance(k, str) or not k.strip():
+            continue
+        if not isinstance(v, list):
+            continue
+        steps = [str(x).strip() for x in v if str(x).strip()]
+        if steps:
+            out[k.strip()] = steps
+    return out
+
+
+def _normalize_categories(raw: object) -> dict:
+    """Normalize { category: { sequence_name: [commands] } }."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for cat, inner in raw.items():
+        if not isinstance(cat, str) or not cat.strip():
+            continue
+        nm = _normalize_sequence_name_map(inner)
+        if nm:
+            out[cat.strip()] = nm
+    return out
+
+
+def load_test_sequences() -> dict:
+    """Load saved test sequences; returns {'categories': {category: {name: [commands]}}}."""
+    path = _test_sequences_file()
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        data = {}
+    categories = {}
+    if isinstance(data, dict):
+        if isinstance(data.get('categories'), dict) and data['categories']:
+            categories = _normalize_categories(data['categories'])
+        legacy_pc = data.get('power_cycle')
+        if isinstance(legacy_pc, dict) and legacy_pc:
+            merged = _normalize_sequence_name_map(legacy_pc)
+            if merged:
+                bucket = categories.setdefault('power_cycle', {})
+                for seq_name, cmds in merged.items():
+                    if seq_name not in bucket:
+                        bucket[seq_name] = cmds
+    return {'categories': categories}
+
+
+def save_test_sequences(store: dict) -> None:
+    path = _test_sequences_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    cats = _normalize_categories(store.get('categories'))
+    payload = {'categories': cats}
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2)
 
 
 def try_parse_quoted_heading(command: str):
@@ -68,7 +138,7 @@ def run_chat_command(
     append_heading,
     append_plot_from_data,
 ) -> None:
-    """Run a single user command: help, quoted heading, plot(...), or bench/bc."""
+    """Run a single user command: help, quoted heading, plot, or bench/bc."""
     cmd = (command or "").strip()
     if not cmd:
         return
@@ -92,7 +162,8 @@ def run_chat_command(
         parsed = parser.parse(plot_inner)
         if not parsed:
             append_error(
-                "Error: plot(inner) needs a valid bench command, e.g. plot(bc.sg.measure frequency)\n\n"
+                "Error: plot needs a valid bench command, e.g. plot bc.sg.measure frequency "
+                "or plot(bc.sg.measure frequency)\n\n"
             )
             return
         try:
@@ -145,6 +216,7 @@ try:
         QCheckBox,
         QSpinBox,
         QMessageBox,
+        QDialogButtonBox,
     )
     from PyQt5.QtCore import Qt, QEvent, QTimer
     from PyQt5.QtGui import QFont, QGuiApplication, QImage, QPalette, QTextCursor, QTextCharFormat
@@ -184,6 +256,13 @@ if PYQT_AVAILABLE:
             scripts_menu = self.menuBar().addMenu('Scripts')
             load_script_action = scripts_menu.addAction('Load Script')
             load_script_action.triggered.connect(self.load_script)
+
+            sequence_menu = self.menuBar().addMenu('Sequence')
+            sequence_menu.addAction('Start').triggered.connect(self._sequence_recording_start)
+            sequence_menu.addAction('Stop').triggered.connect(self._sequence_recording_stop)
+            sequence_menu.addAction('Remove test sequence...').triggered.connect(self._remove_test_sequence_dialog)
+
+            self.test_sequence_menu = self.menuBar().addMenu('Test Sequence')
 
             settings_menu = self.menuBar().addMenu('Settings')
             settings_action = settings_menu.addAction('Bench Settings')
@@ -272,6 +351,9 @@ if PYQT_AVAILABLE:
             self._sequence_active = False
             self._sequence_queue = []
             self._sequence_index = 0
+            self._sequence_recording = False
+            self._sequence_record_buffer = []
+            self._test_sequences = load_test_sequences()
             self._delay_timer = QTimer(self)
             self._delay_timer.setSingleShot(True)
             self._delay_timer.timeout.connect(self._on_delay_timer_done)
@@ -279,20 +361,172 @@ if PYQT_AVAILABLE:
             self.status_bar = self.statusBar()
             self.update_status_bar()
 
-            self._append_text('Lab Automation Chat\n')
+            self._append_text('Lab Chat\n')
             self._append_text("Type 'help' for available commands\n")
             self._append_text("Type 'bench.' or 'bc.' to see command suggestions\n")
             self._append_text("Use semicolons or Shift+Enter for multiple commands.\n")
             self._append_text("Use bench.config.* to manage real/sim mode and discovery.\n")
             self._append_text("Use bench.<inst>.raw <SCPI> for raw instrument commands in real mode.\n")
             self._append_text(
-                "Plot: plot(bc.sg.measure frequency) — scalar; plot list data — 1D; "
-                "plot(bc.osc.get_trace 1) after bc.osc.run — time vs voltage.\n"
+                "Plot: plot bc.sg.measure frequency — scalar; plot list data — 1D; "
+                "plot bc.osc.get_trace 1 after bc.osc.run — time vs voltage (plot(...) still works).\n"
             )
             self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
             self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
             self._append_text('Delay: use delay 10 to wait 10 seconds before the next command; Send becomes Stop.\n')
+            self._append_text(
+                'Sequence menu: Start records commands; Stop asks for category and name; '
+                'Remove deletes a saved sequence. Saved items appear under Test Sequence by category.\n'
+            )
             self._append_text('=' * 60 + '\n\n')
+
+            self._rebuild_test_sequence_menu()
+
+        def _rebuild_test_sequence_menu(self) -> None:
+            self.test_sequence_menu.clear()
+            examples_menu = self.test_sequence_menu.addMenu('Examples')
+            ex = examples_menu.addAction('Power cycle (1s on/off)')
+            ex.triggered.connect(partial(self._run_stored_command_list, list(_EXAMPLE_POWER_CYCLE_COMMANDS)))
+            cats = self._test_sequences.get('categories') or {}
+            for cat in sorted(cats.keys()):
+                sub = self.test_sequence_menu.addMenu(cat)
+                for name in sorted((cats[cat] or {}).keys()):
+                    act = sub.addAction(name)
+                    act.triggered.connect(partial(self._run_named_sequence, cat, name))
+
+        def _run_stored_command_list(self, commands: list) -> None:
+            if self._sequence_active:
+                QMessageBox.warning(self, 'Sequence running', 'Stop the current sequence before starting another.')
+                return
+            self._start_command_sequence(list(commands))
+
+        def _run_named_sequence(self, category: str, name: str) -> None:
+            cmds = ((self._test_sequences.get('categories') or {}).get(category) or {}).get(name)
+            if not cmds:
+                QMessageBox.warning(
+                    'Missing sequence', f'No saved commands for {category!r} / {name!r}.'
+                )
+                return
+            self._run_stored_command_list(list(cmds))
+
+        def _prompt_category_and_name(self, title: str) -> tuple:
+            """Return (category, name) stripped, or (None, None) if cancelled."""
+            d = QDialog(self)
+            d.setWindowTitle(title)
+            d._saved_cat = ''
+            d._saved_name = ''
+            layout = QVBoxLayout(d)
+            form = QFormLayout()
+            cat_edit = QLineEdit()
+            cat_edit.setPlaceholderText('e.g. power_cycle, thermal, bringup')
+            name_edit = QLineEdit()
+            name_edit.setPlaceholderText('e.g. smoke A, overnight soak')
+            form.addRow('Category', cat_edit)
+            form.addRow('Name', name_edit)
+            layout.addLayout(form)
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            layout.addWidget(buttons)
+
+            def on_ok() -> None:
+                cat = cat_edit.text().strip()
+                name = name_edit.text().strip()
+                if not cat or not name:
+                    QMessageBox.warning(d, title, 'Category and name must both be non-empty.')
+                    return
+                d._saved_cat = cat
+                d._saved_name = name
+                d.accept()
+
+            buttons.accepted.connect(on_ok)
+            buttons.rejected.connect(d.reject)
+            if d.exec_() != QDialog.Accepted:
+                return None, None
+            return d._saved_cat, d._saved_name
+
+        def _remove_test_sequence_dialog(self) -> None:
+            cats = self._test_sequences.get('categories') or {}
+            flat = [(c, n) for c in sorted(cats) for n in sorted((cats.get(c) or {}).keys())]
+            if not flat:
+                QMessageBox.information(self, 'Remove test sequence', 'No saved test sequences to remove.')
+                return
+            d = QDialog(self)
+            d.setWindowTitle('Remove test sequence')
+            layout = QVBoxLayout(d)
+            layout.addWidget(QLabel('Select a sequence to remove:'))
+            lw = QListWidget()
+            for c, n in flat:
+                lw.addItem(f'{c} → {n}')
+            lw.setCurrentRow(0)
+            layout.addWidget(lw)
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            layout.addWidget(buttons)
+            buttons.accepted.connect(d.accept)
+            buttons.rejected.connect(d.reject)
+            if d.exec_() != QDialog.Accepted:
+                return
+            row = lw.currentRow()
+            if row < 0:
+                QMessageBox.warning(self, 'Remove test sequence', 'Select an entry in the list.')
+                return
+            category, name = flat[row]
+            reply = QMessageBox.question(
+                self,
+                'Confirm remove',
+                f'Remove sequence {category!r} / {name!r}?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            cat_map = self._test_sequences.setdefault('categories', {})
+            if category in cat_map and name in cat_map[category]:
+                del cat_map[category][name]
+                if not cat_map[category]:
+                    del cat_map[category]
+            try:
+                save_test_sequences(self._test_sequences)
+            except OSError as e:
+                QMessageBox.critical(self, 'Save failed', str(e))
+                return
+            self._rebuild_test_sequence_menu()
+            self._append_text(f'Removed test sequence {category!r} / {name!r}.\n\n')
+
+        def _sequence_recording_start(self) -> None:
+            if self._sequence_active:
+                QMessageBox.warning(self, 'Sequence running', 'Stop the running sequence before starting recording.')
+                return
+            self._sequence_recording = True
+            self._sequence_record_buffer = []
+            self._append_text(f'[{self._timestamp()}] Sequence recording started. Send commands; use Sequence → Stop to save.\n\n')
+
+        def _sequence_recording_stop(self) -> None:
+            if not self._sequence_recording:
+                QMessageBox.information(self, 'Sequence', 'Recording is not active. Choose Sequence → Start first.')
+                return
+            self._sequence_recording = False
+            if not self._sequence_record_buffer:
+                QMessageBox.warning(self, 'Save test sequence', 'Nothing was recorded. Use Start, then send at least one command.')
+                self._sequence_record_buffer = []
+                return
+            category, name = self._prompt_category_and_name('Save test sequence')
+            if category is None:
+                self._append_text('Sequence recording cancelled (not saved).\n\n')
+                self._sequence_record_buffer = []
+                return
+            self._test_sequences.setdefault('categories', {}).setdefault(category, {})[name] = list(
+                self._sequence_record_buffer
+            )
+            try:
+                save_test_sequences(self._test_sequences)
+            except OSError as e:
+                QMessageBox.critical(self, 'Save failed', str(e))
+                self._sequence_record_buffer = []
+                return
+            self._sequence_record_buffer = []
+            self._rebuild_test_sequence_menu()
+            self._append_text(
+                f'Saved test sequence {name!r} under category {category!r} (Test Sequence → {category}).\n\n'
+            )
 
         def _set_run_button_sequence_mode(self, running: bool) -> None:
             if running:
@@ -526,6 +760,8 @@ if PYQT_AVAILABLE:
             self._history_append(raw_text)
             self._history_browse_index = None
             commands = [cmd.strip() for cmd in re.split(r'[;\n\r]+', raw_text) if cmd.strip()]
+            if self._sequence_recording:
+                self._sequence_record_buffer.extend(commands)
             self.input_line.clear()
             self.update_status_bar()
             if not commands:
@@ -850,7 +1086,6 @@ else:
         from tkinter.scrolledtext import ScrolledText
         from tkinter import filedialog
         from tkinter import messagebox
-
         class ChatWindow:
             def __init__(self):
                 self.root = tk.Tk()
@@ -879,6 +1114,15 @@ else:
                 scripts_menu = tk.Menu(self.menu)
                 self.menu.add_cascade(label='Scripts', menu=scripts_menu)
                 scripts_menu.add_command(label='Load Script', command=self.load_script)
+
+                sequence_menu = tk.Menu(self.menu, tearoff=0)
+                self.menu.add_cascade(label='Sequence', menu=sequence_menu)
+                sequence_menu.add_command(label='Start', command=self._sequence_recording_start)
+                sequence_menu.add_command(label='Stop', command=self._sequence_recording_stop)
+                sequence_menu.add_command(label='Remove test sequence...', command=self._remove_test_sequence_dialog)
+
+                self.test_sequence_menu = tk.Menu(self.menu, tearoff=0)
+                self.menu.add_cascade(label='Test Sequence', menu=self.test_sequence_menu)
 
                 settings_menu = tk.Menu(self.menu)
                 self.menu.add_cascade(label='Settings', menu=settings_menu)
@@ -951,6 +1195,9 @@ else:
                 self._sequence_active = False
                 self._sequence_queue = []
                 self._sequence_index = 0
+                self._sequence_recording = False
+                self._sequence_record_buffer = []
+                self._test_sequences = load_test_sequences()
                 self._delay_after_id = None
                 self._pending_step_after_id = None
 
@@ -961,15 +1208,179 @@ else:
                 self._append_text("Use bench.config.* to manage real/sim mode and discovery.\n")
                 self._append_text("Use bench.<inst>.raw <SCPI> for raw instrument commands in real mode.\n")
                 self._append_text(
-                    "Plot: plot(bc.sg.measure frequency) — scalar; 1D list plots vs index; "
-                    "plot(bc.osc.get_trace 1) after bc.osc.run — time vs voltage.\n"
+                    "Plot: plot bc.sg.measure frequency — scalar; 1D list plots vs index; "
+                    "plot bc.osc.get_trace 1 after bc.osc.run — time vs voltage (plot(...) still works).\n"
                 )
                 self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
                 self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
                 self._append_text('Delay: use delay 10 to wait 10 seconds before the next command; Send becomes Stop.\n')
+                self._append_text(
+                    'Sequence menu: Start records commands; Stop asks for category and name; '
+                    'Remove deletes a saved sequence. Saved items appear under Test Sequence by category.\n'
+                )
                 self._append_text('=' * 60 + '\n\n')
 
                 self.update_status_label()
+                self._rebuild_test_sequence_menu()
+
+            def _rebuild_test_sequence_menu(self) -> None:
+                m = self.test_sequence_menu
+                m.delete(0, tk.END)
+                examples = tk.Menu(m, tearoff=0)
+                m.add_cascade(label='Examples', menu=examples)
+                examples.add_command(
+                    label='Power cycle (1s on/off)',
+                    command=lambda: self._run_stored_command_list(list(_EXAMPLE_POWER_CYCLE_COMMANDS)),
+                )
+                cats = self._test_sequences.get('categories') or {}
+                for cat in sorted(cats.keys()):
+                    sub = tk.Menu(m, tearoff=0)
+                    m.add_cascade(label=cat, menu=sub)
+                    for name in sorted((cats[cat] or {}).keys()):
+                        sub.add_command(
+                            label=name,
+                            command=lambda c=cat, n=name: self._run_named_sequence(c, n),
+                        )
+
+            def _run_stored_command_list(self, commands: list) -> None:
+                if self._sequence_active:
+                    messagebox.showwarning('Sequence running', 'Stop the current sequence before starting another.')
+                    return
+                self._start_command_sequence(list(commands))
+
+            def _run_named_sequence(self, category: str, name: str) -> None:
+                cmds = ((self._test_sequences.get('categories') or {}).get(category) or {}).get(name)
+                if not cmds:
+                    messagebox.showwarning('Missing sequence', f'No saved commands for {category!r} / {name!r}.')
+                    return
+                self._run_stored_command_list(list(cmds))
+
+            def _prompt_category_and_name_tk(self, title: str):
+                result = {'ok': False, 'cat': '', 'name': ''}
+                top = tk.Toplevel(self.root)
+                top.title(title)
+                top.transient(self.root)
+                top.grab_set()
+                tk.Label(top, text='Category').grid(row=0, column=0, sticky='w', padx=8, pady=4)
+                e_cat = tk.Entry(top, width=40)
+                e_cat.grid(row=0, column=1, padx=8, pady=4)
+                e_cat.insert(0, 'power_cycle')
+                tk.Label(top, text='Name').grid(row=1, column=0, sticky='w', padx=8, pady=4)
+                e_name = tk.Entry(top, width=40)
+                e_name.grid(row=1, column=1, padx=8, pady=4)
+
+                def on_ok():
+                    cat = e_cat.get().strip()
+                    name = e_name.get().strip()
+                    if not cat or not name:
+                        messagebox.showwarning(title, 'Category and name must both be non-empty.', parent=top)
+                        return
+                    result['ok'] = True
+                    result['cat'] = cat
+                    result['name'] = name
+                    top.destroy()
+
+                def on_cancel():
+                    top.destroy()
+
+                bf = tk.Frame(top)
+                bf.grid(row=2, column=0, columnspan=2, pady=8)
+                tk.Button(bf, text='OK', command=on_ok).pack(side='left', padx=4)
+                tk.Button(bf, text='Cancel', command=on_cancel).pack(side='left', padx=4)
+                top.wait_window()
+                if result['ok']:
+                    return result['cat'], result['name']
+                return None, None
+
+            def _remove_test_sequence_dialog(self) -> None:
+                cats = self._test_sequences.get('categories') or {}
+                flat = [(c, n) for c in sorted(cats) for n in sorted((cats.get(c) or {}).keys())]
+                if not flat:
+                    messagebox.showinfo('Remove test sequence', 'No saved test sequences to remove.')
+                    return
+                top = tk.Toplevel(self.root)
+                top.title('Remove test sequence')
+                top.transient(self.root)
+                top.grab_set()
+                tk.Label(top, text='Select a sequence to remove:').pack(anchor='w', padx=8, pady=4)
+                lb = tk.Listbox(top, height=min(14, len(flat)), width=48)
+                for c, n in flat:
+                    lb.insert(tk.END, f'{c} → {n}')
+                lb.pack(padx=8, pady=4)
+                if flat:
+                    lb.selection_set(0)
+
+                def do_remove():
+                    sel = lb.curselection()
+                    if not sel:
+                        messagebox.showwarning('Remove test sequence', 'Select an entry in the list.', parent=top)
+                        return
+                    category, name = flat[sel[0]]
+                    if not messagebox.askyesno(
+                        'Confirm remove',
+                        f'Remove sequence {category!r} / {name!r}?',
+                        parent=top,
+                    ):
+                        return
+                    cat_map = self._test_sequences.setdefault('categories', {})
+                    if category in cat_map and name in cat_map[category]:
+                        del cat_map[category][name]
+                        if not cat_map[category]:
+                            del cat_map[category]
+                    try:
+                        save_test_sequences(self._test_sequences)
+                    except OSError as e:
+                        messagebox.showerror('Save failed', str(e), parent=top)
+                        return
+                    top.destroy()
+                    self._rebuild_test_sequence_menu()
+                    self._append_text(f'Removed test sequence {category!r} / {name!r}.\n\n')
+
+                bf = tk.Frame(top)
+                bf.pack(pady=8)
+                tk.Button(bf, text='Remove', command=do_remove).pack(side='left', padx=4)
+                tk.Button(bf, text='Cancel', command=top.destroy).pack(side='left', padx=4)
+
+            def _sequence_recording_start(self) -> None:
+                if self._sequence_active:
+                    messagebox.showwarning('Sequence running', 'Stop the running sequence before starting recording.')
+                    return
+                self._sequence_recording = True
+                self._sequence_record_buffer = []
+                self._append_text(
+                    f'[{self._timestamp()}] Sequence recording started. Send commands; use Sequence → Stop to save.\n\n'
+                )
+
+            def _sequence_recording_stop(self) -> None:
+                if not self._sequence_recording:
+                    messagebox.showinfo('Sequence', 'Recording is not active. Choose Sequence → Start first.')
+                    return
+                self._sequence_recording = False
+                if not self._sequence_record_buffer:
+                    messagebox.showwarning(
+                        'Save test sequence', 'Nothing was recorded. Use Start, then send at least one command.'
+                    )
+                    self._sequence_record_buffer = []
+                    return
+                category, name = self._prompt_category_and_name_tk('Save test sequence')
+                if category is None:
+                    self._append_text('Sequence recording cancelled (not saved).\n\n')
+                    self._sequence_record_buffer = []
+                    return
+                self._test_sequences.setdefault('categories', {}).setdefault(category, {})[name] = list(
+                    self._sequence_record_buffer
+                )
+                try:
+                    save_test_sequences(self._test_sequences)
+                except OSError as e:
+                    messagebox.showerror('Save failed', str(e))
+                    self._sequence_record_buffer = []
+                    return
+                self._sequence_record_buffer = []
+                self._rebuild_test_sequence_menu()
+                self._append_text(
+                    f'Saved test sequence {name!r} under category {category!r} (Test Sequence → {category}).\n\n'
+                )
 
             def _set_run_button_sequence_mode(self, running: bool) -> None:
                 if running:
@@ -1235,6 +1646,8 @@ else:
                 self._history_append(raw_text)
                 self._history_browse_index = None
                 commands = [cmd.strip() for cmd in re.split(r'[;\n\r]+', raw_text) if cmd.strip()]
+                if self._sequence_recording:
+                    self._sequence_record_buffer.extend(commands)
                 self.input_line.delete('1.0', tk.END)
                 self.update_status_label()
                 if not commands:

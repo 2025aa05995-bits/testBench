@@ -1,0 +1,12 @@
+{
+  "categories": {
+    "PS": {
+      "PowerCycle": [
+        "\"Power Cycle Test\"",
+        "bc.ps.on",
+        "Delay 1",
+        "bc.ps.off"
+      ]
+    }
+  }
+}
