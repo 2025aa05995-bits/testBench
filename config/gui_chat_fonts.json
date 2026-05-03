@@ -1,0 +1,12 @@
+{
+  "chat_family": "Consolas",
+  "chat_size": 10,
+  "input_family": "Consolas",
+  "input_size": 11,
+  "suggestions_family": "Consolas",
+  "suggestions_size": 11,
+  "status_family": "Segoe UI",
+  "status_size": 10,
+  "menu_family": "Segoe UI",
+  "menu_size": 10
+}

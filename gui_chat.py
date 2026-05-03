@@ -22,6 +22,52 @@ from testbench._paths import default_config_file, repo_root
 
 _CONFIG_DIALOG_START = str(repo_root() / 'config')
 
+_GUI_FONT_PREFS_FILE = str(repo_root() / 'config' / 'gui_chat_fonts.json')
+
+_DEFAULT_GUI_FONT_PREFS = {
+    'chat_family': 'Consolas',
+    'chat_size': 10,
+    'input_family': 'Consolas',
+    'input_size': 11,
+    'suggestions_family': 'Consolas',
+    'suggestions_size': 10,
+    'status_family': 'Segoe UI',
+    'status_size': 13,
+    'menu_family': 'Segoe UI',
+    'menu_size': 13,
+}
+
+
+def load_gui_font_preferences() -> dict:
+    out = dict(_DEFAULT_GUI_FONT_PREFS)
+    try:
+        with open(_GUI_FONT_PREFS_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        return out
+    if not isinstance(data, dict):
+        return out
+    for key, default in _DEFAULT_GUI_FONT_PREFS.items():
+        if key not in data:
+            continue
+        v = data[key]
+        if key.endswith('_size'):
+            try:
+                out[key] = max(6, min(48, int(v)))
+            except (TypeError, ValueError):
+                pass
+        else:
+            if isinstance(v, str) and v.strip():
+                out[key] = v.strip()
+    return out
+
+
+def save_gui_font_preferences(prefs: dict) -> None:
+    os.makedirs(os.path.dirname(_GUI_FONT_PREFS_FILE), exist_ok=True)
+    to_save = {k: prefs.get(k, _DEFAULT_GUI_FONT_PREFS[k]) for k in _DEFAULT_GUI_FONT_PREFS}
+    with open(_GUI_FONT_PREFS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(to_save, f, indent=2)
+
 
 def _gui_app_assets_dir() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
@@ -271,19 +317,118 @@ try:
         QSpinBox,
         QMessageBox,
         QDialogButtonBox,
+        QStyleFactory,
     )
     from PyQt5.QtCore import Qt, QEvent, QTimer
-    from PyQt5.QtGui import QFont, QGuiApplication, QIcon, QImage, QPalette, QTextCursor, QTextCharFormat
+    from PyQt5.QtGui import QColor, QFont, QGuiApplication, QIcon, QImage, QTextCursor, QTextCharFormat
     PYQT_AVAILABLE = True
 except ImportError:
     PYQT_AVAILABLE = False
 
 
 if PYQT_AVAILABLE:
+    _LAB_CHAT_MAIN_QSS = """
+        QMainWindow { background-color: #e9ecef; }
+        QMenuBar {
+            background-color: #ffffff;
+            border-bottom: 1px solid #dee2e6;
+            padding: 3px 6px;
+        }
+        QMenuBar::item { padding: 5px 12px; border-radius: 4px; }
+        QMenuBar::item:selected { background-color: #e7f1ff; }
+        QMenuBar::item:pressed { background-color: #cfe2ff; }
+        QStatusBar {
+            background-color: #ffffff;
+            border-top: 1px solid #dee2e6;
+            color: #495057;
+            padding: 3px 10px;
+        }
+        QTextEdit#chatDisplay {
+            background-color: #ffffff;
+            color: #212529;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 12px 14px;
+            selection-background-color: #0d6efd;
+            selection-color: #ffffff;
+        }
+        QTextEdit#inputLine {
+            background-color: #ffffff;
+            color: #212529;
+            border: 1px solid #adb5bd;
+            border-radius: 8px;
+            padding: 10px 12px;
+            selection-background-color: #0d6efd;
+            selection-color: #ffffff;
+        }
+        QTextEdit#inputLine:focus { border: 1px solid #0d6efd; }
+        QListWidget#suggestionsList {
+            background-color: #ffffff;
+            color: #212529;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 4px;
+        }
+        QListWidget#suggestionsList::item { padding: 6px 8px; border-radius: 4px; }
+        QListWidget#suggestionsList::item:selected { background-color: #e7f1ff; color: #084298; }
+        QListWidget#suggestionsList::item:hover { background-color: #f1f3f5; }
+        QPushButton#secondaryClearButton {
+            min-width: 80px;
+            max-width: 80px;
+            min-height: 40px;
+            max-height: 40px;
+            background-color: #ffffff;
+            color: #495057;
+            border: 1px solid #ced4da;
+            border-radius: 10px;
+            font-family: "Segoe UI", "Arial", sans-serif;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        QPushButton#secondaryClearButton:hover { background-color: #f8f9fa; border-color: #adb5bd; }
+        QPushButton#secondaryClearButton:pressed { background-color: #e9ecef; }
+    """
+
+    _LAB_CHAT_SEND_QSS = """
+        QPushButton#primarySendButton {
+            min-width: 80px;
+            max-width: 80px;
+            min-height: 40px;
+            max-height: 40px;
+            background-color: #0d6efd;
+            color: #ffffff;
+            border: none;
+            border-radius: 10px;
+            font-family: "Segoe UI", "Arial", sans-serif;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        QPushButton#primarySendButton:hover { background-color: #0b5ed7; }
+        QPushButton#primarySendButton:pressed { background-color: #0a58ca; }
+    """
+
+    _LAB_CHAT_STOP_QSS = """
+        QPushButton#primarySendButton {
+            min-width: 80px;
+            max-width: 80px;
+            min-height: 40px;
+            max-height: 40px;
+            background-color: #dc3545;
+            color: #ffffff;
+            border: none;
+            border-radius: 10px;
+            font-family: "Segoe UI", "Arial", sans-serif;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        QPushButton#primarySendButton:hover { background-color: #bb2d3b; }
+        QPushButton#primarySendButton:pressed { background-color: #a52834; }
+    """
+
     class ChatWindow(QMainWindow):
         def __init__(self):
             super().__init__()
-            self.setWindowTitle('Lab Chat')
+            self.setWindowTitle('Lab Automation Chat')
             # Size window to ~75% of available screen
             try:
                 screen = QGuiApplication.primaryScreen()
@@ -321,77 +466,69 @@ if PYQT_AVAILABLE:
             settings_menu = self.menuBar().addMenu('Settings')
             settings_action = settings_menu.addAction('Bench Settings')
             settings_action.triggered.connect(self.open_bench_settings)
+            fonts_action = settings_menu.addAction('Fonts…')
+            fonts_action.triggered.connect(self.open_font_settings)
 
             help_menu = self.menuBar().addMenu('Help')
             show_help_action = help_menu.addAction('Show Commands')
             show_help_action.triggered.connect(self.show_help)
 
             central_widget = QWidget()
+            central_widget.setObjectName('centralRoot')
             self.layout = QVBoxLayout(central_widget)
+            self.layout.setContentsMargins(14, 14, 14, 14)
+            self.layout.setSpacing(12)
 
             self.chat_display = QTextEdit()
+            self.chat_display.setObjectName('chatDisplay')
             self.chat_display.setReadOnly(True)
-            self.layout.addWidget(self.chat_display)
+            self.layout.addWidget(self.chat_display, 1)
 
-            # Chat-style composer row (input + small send button)
             composer_row = QHBoxLayout()
+            composer_row.setSpacing(10)
 
             self.input_line = QTextEdit()
+            self.input_line.setObjectName('inputLine')
             self.input_line.setAcceptRichText(False)
-            # Make command input smaller; let chat take most space
-            self.input_line.setFixedHeight(90)
+            self.input_line.setFixedHeight(92)
             self.input_line.installEventFilter(self)
             self.input_line.textChanged.connect(self.on_input_changed)
-            self.input_line.setPlaceholderText('Enter commands here. Use ; or newline to separate multiple commands.')
+            self.input_line.setPlaceholderText(
+                'Command line — bench. / bc. commands; use ; or newline between steps. Shift+Enter for newline.'
+            )
             composer_row.addWidget(self.input_line, 1)
 
             action_col = QVBoxLayout()
+            action_col.setSpacing(8)
+            action_col.addStretch(1)
 
-            self.clear_button = QPushButton('✕')
-            self.clear_button.setToolTip('Clear screen')
-            self.clear_button.setFixedSize(44, 32)
-            self.clear_button.setStyleSheet("""
-                QPushButton {
-                    border: 1px solid #cfcfcf;
-                    border-radius: 10px;
-                    background: white;
-                    font-size: 14px;
-                    padding: 0px;
-                }
-                QPushButton:hover { background: #f5f5f5; }
-                QPushButton:pressed { background: #eeeeee; }
-            """)
+            self.clear_button = QPushButton('Clear')
+            self.clear_button.setObjectName('secondaryClearButton')
+            self.clear_button.setToolTip('Clear log view')
             self.clear_button.clicked.connect(self.clear_screen)
-            action_col.addWidget(self.clear_button, 0, Qt.AlignRight)
+            action_col.addWidget(self.clear_button, 0, Qt.AlignHCenter)
 
-            self.send_button = QPushButton('▶')
-            self.send_button.setToolTip('Send')
-            self.send_button.setFixedSize(44, 44)
-            self.send_button.setStyleSheet("""
-                QPushButton {
-                    border: 1px solid #cfcfcf;
-                    border-radius: 10px;
-                    background: white;
-                    font-size: 18px;
-                    padding: 0px;
-                }
-                QPushButton:hover { background: #f5f5f5; }
-                QPushButton:pressed { background: #eeeeee; }
-            """)
+            self.send_button = QPushButton('Send')
+            self.send_button.setObjectName('primarySendButton')
+            self.send_button.setToolTip('Run command (Enter)')
+            self.send_button.setStyleSheet(_LAB_CHAT_SEND_QSS)
             self.send_button.clicked.connect(self._on_send_or_stop_clicked)
-            action_col.addWidget(self.send_button, 0, Qt.AlignRight)
+            action_col.addWidget(self.send_button, 0, Qt.AlignHCenter)
 
             composer_row.addLayout(action_col)
 
             self.layout.addLayout(composer_row)
 
             self.suggestions_list = QListWidget()
+            self.suggestions_list.setObjectName('suggestionsList')
             self.suggestions_list.setMaximumHeight(140)
+            self.suggestions_list.setUniformItemSizes(True)
             self.suggestions_list.itemClicked.connect(self.on_suggestion_clicked)
             self.layout.addWidget(self.suggestions_list)
             self.suggestions_list.hide()
 
             self.setCentralWidget(central_widget)
+            self.setStyleSheet(_LAB_CHAT_MAIN_QSS)
 
             self.parser = CommandParser()
             self.registry = CommandRegistry()
@@ -413,9 +550,12 @@ if PYQT_AVAILABLE:
             self._delay_timer.timeout.connect(self._on_delay_timer_done)
 
             self.status_bar = self.statusBar()
+            self._font_prefs = load_gui_font_preferences()
+            self._apply_widget_fonts()
+            self._apply_menu_fonts()
             self.update_status_bar()
 
-            self._append_text('Lab Chat\n')
+            self._append_text('Lab Automation Chat\n')
             self._append_text("Type 'help' for available commands\n")
             self._append_text("Type 'bench.' or 'bc.' to see command suggestions\n")
             self._append_text("Use semicolons or Shift+Enter for multiple commands.\n")
@@ -437,6 +577,94 @@ if PYQT_AVAILABLE:
 
             self._rebuild_test_sequence_menu()
 
+        def _apply_widget_fonts(self) -> None:
+            p = self._font_prefs
+            self.chat_display.setFont(QFont(p['chat_family'], p['chat_size']))
+            self.input_line.setFont(QFont(p['input_family'], p['input_size']))
+            self.suggestions_list.setFont(QFont(p['suggestions_family'], p['suggestions_size']))
+            self.status_bar.setFont(QFont(p['status_family'], p['status_size']))
+
+        def _apply_menu_fonts(self) -> None:
+            p = self._font_prefs
+            mf = QFont(p['menu_family'], p['menu_size'])
+            self.menuBar().setFont(mf)
+
+            def walk_menu(menu) -> None:
+                menu.setFont(mf)
+                for act in menu.actions():
+                    if act.menu():
+                        walk_menu(act.menu())
+
+            for act in self.menuBar().actions():
+                if act.menu():
+                    walk_menu(act.menu())
+
+        def _apply_font_preferences(self) -> None:
+            self._apply_widget_fonts()
+            self._apply_menu_fonts()
+
+        def open_font_settings(self) -> None:
+            p = dict(self._font_prefs)
+            d = QDialog(self)
+            d.setWindowTitle('Font settings')
+            d.setModal(True)
+            d.resize(520, 340)
+            layout = QVBoxLayout(d)
+            layout.addWidget(
+                QLabel('Font family and size (points). Saved to config/gui_chat_fonts.json')
+            )
+            form = QFormLayout()
+            rows = [
+                ('chat_family', 'chat_size', 'Log / chat'),
+                ('input_family', 'input_size', 'Command line'),
+                ('suggestions_family', 'suggestions_size', 'Suggestions'),
+                ('status_family', 'status_size', 'Status bar'),
+                ('menu_family', 'menu_size', 'Menus'),
+            ]
+            edits: dict = {}
+            for fk, sk, label in rows:
+                row_w = QWidget()
+                row = QHBoxLayout(row_w)
+                row.setContentsMargins(0, 0, 0, 0)
+                fe = QLineEdit()
+                fe.setText(str(p.get(fk, '')))
+                sz = QSpinBox()
+                sz.setRange(6, 48)
+                sz.setValue(int(p.get(sk, 10)))
+                row.addWidget(fe, 1)
+                row.addWidget(QLabel('pt'))
+                row.addWidget(sz)
+                form.addRow(label + ':', row_w)
+                edits[fk] = fe
+                edits[sk] = sz
+            layout.addLayout(form)
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            layout.addWidget(buttons)
+
+            def on_ok() -> None:
+                newp = dict(_DEFAULT_GUI_FONT_PREFS)
+                for fk, sk, _lbl in [
+                    ('chat_family', 'chat_size', ''),
+                    ('input_family', 'input_size', ''),
+                    ('suggestions_family', 'suggestions_size', ''),
+                    ('status_family', 'status_size', ''),
+                    ('menu_family', 'menu_size', ''),
+                ]:
+                    fam = edits[fk].text().strip()
+                    if not fam:
+                        QMessageBox.warning(d, 'Font settings', f'Family for {fk} cannot be empty.')
+                        return
+                    newp[fk] = fam
+                    newp[sk] = int(edits[sk].value())
+                self._font_prefs = newp
+                save_gui_font_preferences(newp)
+                self._apply_font_preferences()
+                d.accept()
+
+            buttons.accepted.connect(on_ok)
+            buttons.rejected.connect(d.reject)
+            d.exec_()
+
         def _rebuild_test_sequence_menu(self) -> None:
             self.test_sequence_menu.clear()
             examples_menu = self.test_sequence_menu.addMenu('Examples')
@@ -448,6 +676,7 @@ if PYQT_AVAILABLE:
                 for name in sorted((cats[cat] or {}).keys()):
                     act = sub.addAction(name)
                     act.triggered.connect(partial(self._run_named_sequence, cat, name))
+            self._apply_menu_fonts()
 
         def _run_stored_command_list(self, commands: list) -> None:
             if self._sequence_active:
@@ -586,10 +815,12 @@ if PYQT_AVAILABLE:
         def _set_run_button_sequence_mode(self, running: bool) -> None:
             if running:
                 self.send_button.setText('Stop')
-                self.send_button.setToolTip('Stop sequence')
+                self.send_button.setToolTip('Stop running sequence')
+                self.send_button.setStyleSheet(_LAB_CHAT_STOP_QSS)
             else:
-                self.send_button.setText('▶')
-                self.send_button.setToolTip('Send')
+                self.send_button.setText('Send')
+                self.send_button.setToolTip('Run command (Enter)')
+                self.send_button.setStyleSheet(_LAB_CHAT_SEND_QSS)
 
         def _on_send_or_stop_clicked(self) -> None:
             if self._sequence_active:
@@ -825,7 +1056,7 @@ if PYQT_AVAILABLE:
 
         def _default_char_format(self) -> QTextCharFormat:
             fmt = QTextCharFormat()
-            fmt.setForeground(self.chat_display.palette().color(QPalette.Active, QPalette.Text))
+            fmt.setForeground(QColor('#212529'))
             return fmt
 
         def _append_text(self, text: str):
@@ -851,7 +1082,7 @@ if PYQT_AVAILABLE:
                 pt = self.chat_display.fontInfo().pointSize() or 10
             f.setPointSize(pt + 2)
             hf.setFont(f)
-            hf.setForeground(self.chat_display.palette().color(QPalette.Active, QPalette.Text))
+            hf.setForeground(QColor('#0c4a6e'))
             cursor.setCharFormat(hf)
             cursor.insertText(title + "\n")
             cursor.setCharFormat(self._default_char_format())
@@ -870,7 +1101,7 @@ if PYQT_AVAILABLE:
             cursor = self.chat_display.textCursor()
             cursor.movePosition(QTextCursor.End)
             char_format = QTextCharFormat()
-            char_format.setForeground(Qt.red)
+            char_format.setForeground(QColor('#c92a2a'))
             cursor.insertText(text, char_format)
             cursor.setCharFormat(self._default_char_format())
             self.chat_display.setTextCursor(cursor)
@@ -1132,8 +1363,11 @@ if PYQT_AVAILABLE:
     def main():
         _windows_set_app_user_model_id()
         app = QApplication(sys.argv)
+        fusion = QStyleFactory.create('Fusion')
+        if fusion is not None:
+            app.setStyle(fusion)
         app.setApplicationName('LabAutomationChat')
-        app.setApplicationDisplayName('Lab Chat')
+        app.setApplicationDisplayName('Lab Automation Chat')
         icon_path = _gui_app_icon_path_preferred()
         if icon_path:
             app_icon = QIcon(icon_path)
@@ -1155,7 +1389,19 @@ else:
         class ChatWindow:
             def __init__(self):
                 self.root = tk.Tk()
-                self.root.title('Lab Chat')
+                self.root.title('Lab Automation Chat')
+                _bg = '#e9ecef'
+                _card = '#ffffff'
+                _border = '#dee2e6'
+                _text = '#212529'
+                _muted = '#6c757d'
+                _accent = '#0d6efd'
+                _accent_hi = '#0b5ed7'
+                self._tk_accent = _accent
+                self._tk_accent_hi = _accent_hi
+                self._tk_stop = '#dc3545'
+                self._tk_stop_hi = '#bb2d3b'
+                self.root.configure(bg=_bg)
                 self._wm_icon_photo = None
                 d = _gui_app_assets_dir()
                 ico_p = os.path.join(d, 'lab_chat_icon.ico')
@@ -1186,85 +1432,170 @@ else:
                 except Exception:
                     self.root.geometry('1000x750')
 
-                self.menu = tk.Menu(self.root)
+                self._font_prefs = load_gui_font_preferences()
+                fp = self._font_prefs
+                self._tk_menu_font = (fp['menu_family'], fp['menu_size'])
+                self.menu = tk.Menu(self.root, font=self._tk_menu_font)
                 self.root.config(menu=self.menu)
 
-                file_menu = tk.Menu(self.menu)
+                file_menu = tk.Menu(self.menu, font=self._tk_menu_font)
                 self.menu.add_cascade(label='File', menu=file_menu)
                 file_menu.add_command(label='Save Log', command=self.save_log)
                 file_menu.add_command(label='Load Config', command=self.load_config)
                 file_menu.add_command(label='Exit', command=self.root.quit)
 
-                scripts_menu = tk.Menu(self.menu)
+                scripts_menu = tk.Menu(self.menu, font=self._tk_menu_font)
                 self.menu.add_cascade(label='Scripts', menu=scripts_menu)
                 scripts_menu.add_command(label='Load Script', command=self.load_script)
 
-                sequence_menu = tk.Menu(self.menu, tearoff=0)
+                sequence_menu = tk.Menu(self.menu, tearoff=0, font=self._tk_menu_font)
                 self.menu.add_cascade(label='Sequence', menu=sequence_menu)
                 sequence_menu.add_command(label='Start', command=self._sequence_recording_start)
                 sequence_menu.add_command(label='Stop', command=self._sequence_recording_stop)
                 sequence_menu.add_command(label='Remove test sequence...', command=self._remove_test_sequence_dialog)
 
-                self.test_sequence_menu = tk.Menu(self.menu, tearoff=0)
+                self.test_sequence_menu = tk.Menu(self.menu, tearoff=0, font=self._tk_menu_font)
                 self.menu.add_cascade(label='Test Sequence', menu=self.test_sequence_menu)
 
-                settings_menu = tk.Menu(self.menu)
+                settings_menu = tk.Menu(self.menu, font=self._tk_menu_font)
                 self.menu.add_cascade(label='Settings', menu=settings_menu)
                 settings_menu.add_command(label='Bench Settings', command=self.open_bench_settings)
+                settings_menu.add_command(label='Fonts…', command=self.open_font_settings)
 
-                help_menu = tk.Menu(self.menu)
+                help_menu = tk.Menu(self.menu, font=self._tk_menu_font)
                 self.menu.add_cascade(label='Help', menu=help_menu)
                 help_menu.add_command(label='Show Commands', command=self.show_help)
 
-                self.chat_display = ScrolledText(self.root, state='disabled', wrap='word')
-                self.chat_display.pack(fill='both', expand=True, padx=8, pady=8)
-                self.chat_display.tag_configure("error", foreground="red")
-                _base_tf = tkfont.nametofont("TkTextFont")
-                _act = _base_tf.actual()
+                _mono_chat = (fp['chat_family'], fp['chat_size'])
+                _mono_input = (fp['input_family'], fp['input_size'])
+                _mono_suggest = (fp['suggestions_family'], fp['suggestions_size'])
+                self.chat_display = ScrolledText(
+                    self.root,
+                    state='disabled',
+                    wrap='word',
+                    font=_mono_chat,
+                    bg=_card,
+                    fg=_text,
+                    relief='flat',
+                    highlightthickness=1,
+                    highlightbackground=_border,
+                    highlightcolor=_accent,
+                    padx=10,
+                    pady=10,
+                    insertbackground=_text,
+                )
+                self.chat_display.pack(fill='both', expand=True, padx=12, pady=12)
+                self.chat_display.tag_configure('error', foreground='#c92a2a')
                 self._heading_font = tkfont.Font(
                     self.root,
-                    family=_act["family"],
-                    size=_act["size"] + 2,
-                    weight="bold",
+                    family=fp['chat_family'],
+                    size=max(6, int(fp['chat_size']) + 2),
+                    weight='bold',
                     underline=True,
                 )
-                self.chat_display.tag_configure("heading", font=self._heading_font)
+                self.chat_display.tag_configure('heading', font=self._heading_font, foreground='#0c4a6e')
 
-                self.input_frame = tk.Frame(self.root)
-                self.input_frame.pack(fill='x', padx=8, pady=(0, 0))
+                self.input_frame = tk.Frame(self.root, bg=_bg)
+                self.input_frame.pack(fill='x', padx=12, pady=(0, 10))
 
-                # Smaller command box; chat gets most space
-                self.input_line = tk.Text(self.input_frame, height=3, wrap='word')
-                self.input_line.pack(side='left', fill='x', expand=True, padx=(0, 8))
+                self.input_line = tk.Text(
+                    self.input_frame,
+                    height=3,
+                    wrap='word',
+                    font=_mono_input,
+                    bg=_card,
+                    fg=_text,
+                    relief='flat',
+                    highlightthickness=1,
+                    highlightbackground='#adb5bd',
+                    highlightcolor=_accent,
+                    padx=8,
+                    pady=6,
+                    insertbackground=_text,
+                )
+                self.input_line.pack(side='left', fill='x', expand=True, padx=(0, 10))
                 self.input_line.bind('<Return>', self.on_text_return)
                 self.input_line.bind('<KeyRelease>', self.on_input_changed)
                 self.input_line.bind('<Up>', self.on_suggestion_up)
                 self.input_line.bind('<Down>', self.on_suggestion_down)
                 self.input_line.bind('<Tab>', self.on_suggestion_tab)
 
-                # Small chat-style send button
-                self.action_frame = tk.Frame(self.input_frame)
-                self.action_frame.pack(side='right')
+                self.action_frame = tk.Frame(self.input_frame, bg=_bg)
+                self.action_frame.pack(side='right', fill='y')
+                _btn_w = 10
+                _btn_padx = 12
+                _btn_pady = 8
 
-                self.clear_button = tk.Button(self.action_frame, text='✕', command=self.clear_screen, width=3, height=1)
-                self.clear_button.pack(side='top', pady=(0, 6))
-
-                self.send_button = tk.Button(
-                    self.action_frame, text='▶', command=self._on_send_or_stop_clicked, width=4, height=2
+                self.clear_button = tk.Button(
+                    self.action_frame,
+                    text='Clear',
+                    command=self.clear_screen,
+                    font=('Segoe UI', 9, 'bold'),
+                    width=_btn_w,
+                    bg=_card,
+                    fg=_muted,
+                    activebackground='#f8f9fa',
+                    activeforeground=_text,
+                    relief='solid',
+                    borderwidth=1,
+                    highlightthickness=0,
+                    padx=_btn_padx,
+                    pady=_btn_pady,
+                    cursor='hand2',
                 )
-                self.send_button.pack(side='top')
+                self.send_button = tk.Button(
+                    self.action_frame,
+                    text='Send',
+                    command=self._on_send_or_stop_clicked,
+                    font=('Segoe UI', 9, 'bold'),
+                    width=_btn_w,
+                    bg=_accent,
+                    fg='#ffffff',
+                    activebackground=_accent_hi,
+                    activeforeground='#ffffff',
+                    relief='flat',
+                    padx=_btn_padx,
+                    pady=_btn_pady,
+                    cursor='hand2',
+                )
+                self.send_button.pack(side='bottom')
+                self.clear_button.pack(side='bottom', pady=(0, 8))
 
-                self.suggestions_frame = tk.Frame(self.root)
-                self.suggestions_frame.pack(fill='x', padx=8, pady=(0, 8))
+                self.suggestions_frame = tk.Frame(self.root, bg=_bg)
+                self.suggestions_frame.pack(fill='x', padx=12, pady=(0, 8))
 
-                self.suggestions_list = tk.Listbox(self.suggestions_frame, height=5)
+                self.suggestions_list = tk.Listbox(
+                    self.suggestions_frame,
+                    height=5,
+                    font=_mono_suggest,
+                    bg=_card,
+                    fg=_text,
+                    relief='flat',
+                    highlightthickness=1,
+                    highlightbackground=_border,
+                    selectbackground='#e7f1ff',
+                    selectforeground='#084298',
+                    activestyle='none',
+                )
                 self.suggestions_list.pack(fill='x')
                 self.suggestions_list.bind('<Button-1>', self.on_suggestion_clicked)
                 self.suggestions_list.bind('<Return>', self.on_suggestion_select)
                 self.suggestions_list.pack_forget()
 
-                self.status_label = tk.Label(self.root, text="", anchor='w')
-                self.status_label.pack(fill='x', padx=8, pady=(0, 8))
+                self.status_label = tk.Label(
+                    self.root,
+                    text='',
+                    anchor='w',
+                    bg=_card,
+                    fg=_muted,
+                    font=(fp['status_family'], fp['status_size']),
+                    relief='flat',
+                    highlightthickness=1,
+                    highlightbackground=_border,
+                    padx=10,
+                    pady=6,
+                )
+                self.status_label.pack(fill='x', padx=12, pady=(0, 10))
 
                 self.parser = CommandParser()
                 self.registry = CommandRegistry()
@@ -1285,7 +1616,7 @@ else:
                 self._delay_after_id = None
                 self._pending_step_after_id = None
 
-                self._append_text('Lab Chat\n')
+                self._append_text('Lab Automation Chat\n')
                 self._append_text("Type 'help' for available commands\n")
                 self._append_text("Type 'bench.' or 'bc.' to see command suggestions\n")
                 self._append_text("Use semicolons or Shift+Enter for multiple commands.\n")
@@ -1311,7 +1642,7 @@ else:
             def _rebuild_test_sequence_menu(self) -> None:
                 m = self.test_sequence_menu
                 m.delete(0, tk.END)
-                examples = tk.Menu(m, tearoff=0)
+                examples = tk.Menu(m, tearoff=0, font=self._tk_menu_font)
                 m.add_cascade(label='Examples', menu=examples)
                 examples.add_command(
                     label='Power cycle (1s on/off)',
@@ -1319,7 +1650,7 @@ else:
                 )
                 cats = self._test_sequences.get('categories') or {}
                 for cat in sorted(cats.keys()):
-                    sub = tk.Menu(m, tearoff=0)
+                    sub = tk.Menu(m, tearoff=0, font=self._tk_menu_font)
                     m.add_cascade(label=cat, menu=sub)
                     for name in sorted((cats[cat] or {}).keys()):
                         sub.add_command(
@@ -1469,9 +1800,17 @@ else:
 
             def _set_run_button_sequence_mode(self, running: bool) -> None:
                 if running:
-                    self.send_button.config(text='Stop')
+                    self.send_button.config(
+                        text='Stop',
+                        bg=self._tk_stop,
+                        activebackground=self._tk_stop_hi,
+                    )
                 else:
-                    self.send_button.config(text='▶')
+                    self.send_button.config(
+                        text='Send',
+                        bg=self._tk_accent,
+                        activebackground=self._tk_accent_hi,
+                    )
 
             def _cancel_after_id(self, attr: str) -> None:
                 aid = getattr(self, attr, None)
@@ -1903,6 +2242,77 @@ else:
 
                 tk.Button(btn_frame, text='Save', command=do_save_and_close).pack(side='left')
                 tk.Button(btn_frame, text='Cancel', command=top.destroy).pack(side='left', padx=(8, 0))
+
+            def _apply_font_preferences_tk(self) -> None:
+                fp = self._font_prefs
+                self.chat_display.configure(font=(fp['chat_family'], fp['chat_size']))
+                self.input_line.configure(font=(fp['input_family'], fp['input_size']))
+                self.suggestions_list.configure(font=(fp['suggestions_family'], fp['suggestions_size']))
+                self.status_label.configure(font=(fp['status_family'], fp['status_size']))
+                self._heading_font.configure(
+                    family=fp['chat_family'],
+                    size=max(6, int(fp['chat_size']) + 2),
+                )
+                self.chat_display.tag_configure('heading', font=self._heading_font, foreground='#0c4a6e')
+
+            def open_font_settings(self) -> None:
+                top = tk.Toplevel(self.root)
+                top.title('Font settings')
+                top.transient(self.root)
+                top.grab_set()
+                tk.Label(
+                    top,
+                    text='Saved to config/gui_chat_fonts.json. Menu bar font updates after restart (Tk).',
+                    wraplength=480,
+                    justify='left',
+                ).pack(anchor='w', padx=10, pady=(10, 6))
+                fp = dict(self._font_prefs)
+                rows = [
+                    ('chat_family', 'chat_size', 'Log / chat'),
+                    ('input_family', 'input_size', 'Command line'),
+                    ('suggestions_family', 'suggestions_size', 'Suggestions'),
+                    ('status_family', 'status_size', 'Status bar'),
+                    ('menu_family', 'menu_size', 'Menus'),
+                ]
+                frm = tk.Frame(top)
+                frm.pack(fill='both', padx=10, pady=4)
+                entries = {}
+                for i, (fk, sk, lab) in enumerate(rows):
+                    tk.Label(frm, text=f'{lab}:').grid(row=i, column=0, sticky='w', pady=4)
+                    ef = tk.Entry(frm, width=24)
+                    ef.insert(0, str(fp.get(fk, '')))
+                    ef.grid(row=i, column=1, padx=6)
+                    sv = tk.StringVar(value=str(int(fp.get(sk, 10))))
+                    sp = tk.Spinbox(frm, from_=6, to=48, textvariable=sv, width=5)
+                    sp.grid(row=i, column=2, sticky='w')
+                    tk.Label(frm, text='pt').grid(row=i, column=3, sticky='w')
+                    entries[(fk, sk)] = (ef, sv)
+
+                btnf = tk.Frame(top)
+                btnf.pack(pady=10)
+
+                def on_ok():
+                    newp = dict(_DEFAULT_GUI_FONT_PREFS)
+                    for fk, sk, _lab in rows:
+                        fam = entries[(fk, sk)][0].get().strip()
+                        if not fam:
+                            messagebox.showwarning('Font settings', 'Every font family must be non-empty.', parent=top)
+                            return
+                        try:
+                            size = int(entries[(fk, sk)][1].get())
+                        except ValueError:
+                            messagebox.showwarning('Font settings', 'Invalid point size.', parent=top)
+                            return
+                        newp[fk] = fam
+                        newp[sk] = max(6, min(48, size))
+                    self._font_prefs = newp
+                    self._tk_menu_font = (newp['menu_family'], newp['menu_size'])
+                    save_gui_font_preferences(newp)
+                    self._apply_font_preferences_tk()
+                    top.destroy()
+
+                tk.Button(btnf, text='OK', command=on_ok).pack(side='left', padx=4)
+                tk.Button(btnf, text='Cancel', command=top.destroy).pack(side='left', padx=4)
 
             def show_help(self):
                 response = handle_help([], self.registry)
