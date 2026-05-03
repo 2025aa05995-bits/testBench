@@ -4,16 +4,60 @@ import os
 import json
 from datetime import datetime
 from functools import partial
+from typing import Optional
 
 # Add src directory to path BEFORE importing testbench modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from testbench.chat_plotting import try_extract_plot_command, render_plot_to_png_bytes
+from testbench.chat_plotting import (
+    plot_data_csv_path,
+    render_plot_to_png_bytes,
+    should_log_plot_data_as_csv,
+    try_extract_plot_command,
+    write_plot_series_csv,
+)
 from testbench.command_parser import CommandParser, handle_help
 from testbench.command_registry import CommandRegistry
 from testbench._paths import default_config_file, repo_root
 
 _CONFIG_DIALOG_START = str(repo_root() / 'config')
+
+
+def _gui_app_assets_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+
+
+def _gui_app_icon_path_preferred() -> Optional[str]:
+    """
+    Path to window/taskbar icon: prefer multi-size ``lab_chat_icon.ico`` on Windows,
+    else ``lab_chat_icon.png``, else any file that exists.
+    """
+    d = _gui_app_assets_dir()
+    ico = os.path.join(d, 'lab_chat_icon.ico')
+    png = os.path.join(d, 'lab_chat_icon.png')
+    if sys.platform == 'win32' and os.path.isfile(ico):
+        return ico
+    if os.path.isfile(png):
+        return png
+    if os.path.isfile(ico):
+        return ico
+    return None
+
+
+def _windows_set_app_user_model_id() -> None:
+    """
+    Pin the taskbar identity to this app instead of python.exe (Windows 7+).
+
+    Must run before creating QApplication or the Tk root window.
+    """
+    if sys.platform != 'win32':
+        return
+    try:
+        import ctypes
+        # Stable arbitrary ID — unique per product so the taskbar icon is not merged with Python.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('TestBench.LabAutomationChat.1.0')
+    except Exception:
+        pass
 
 # Built-in power-cycle example: on, wait 1s, off (matches menu "Power cycle test" example).
 _EXAMPLE_POWER_CYCLE_COMMANDS = ['bc.ps.on', 'delay 1', 'bc.ps.off']
@@ -157,18 +201,28 @@ def run_chat_command(
         append_heading(title)
         return
 
-    plot_inner = try_extract_plot_command(cmd)
-    if plot_inner is not None:
+    plot_parts = try_extract_plot_command(cmd)
+    if plot_parts is not None:
+        plot_file_label, plot_inner = plot_parts
         parsed = parser.parse(plot_inner)
         if not parsed:
             append_error(
-                "Error: plot needs a valid bench command, e.g. plot bc.sg.measure frequency "
-                "or plot(bc.sg.measure frequency)\n\n"
+                "Error: plot needs a valid bench command, e.g. plot bc.sg.measure frequency, "
+                'plot "My run" bc.osc.get_trace 1, or plot(bc.sg.measure frequency)\n\n'
             )
             return
         try:
             result = registry.execute(parsed["category"], parsed["action"], parsed["args"])
-            append_text(f"Result: {result}\n")
+            if should_log_plot_data_as_csv(result):
+                try:
+                    csv_path = plot_data_csv_path(plot_file_label)
+                    nrows = write_plot_series_csv(result, csv_path)[2]
+                    append_text(f"Result: {nrows} data rows logged to CSV (not printed here).\n{csv_path}\n")
+                except OSError as e:
+                    append_error(f"Could not write plot CSV log: {e}\n")
+                    append_text(f"Result: {result}\n")
+            else:
+                append_text(f"Result: {result}\n")
             append_plot_from_data(result)
             append_text("\n")
         except ValueError as e:
@@ -219,7 +273,7 @@ try:
         QDialogButtonBox,
     )
     from PyQt5.QtCore import Qt, QEvent, QTimer
-    from PyQt5.QtGui import QFont, QGuiApplication, QImage, QPalette, QTextCursor, QTextCharFormat
+    from PyQt5.QtGui import QFont, QGuiApplication, QIcon, QImage, QPalette, QTextCursor, QTextCharFormat
     PYQT_AVAILABLE = True
 except ImportError:
     PYQT_AVAILABLE = False
@@ -229,7 +283,7 @@ if PYQT_AVAILABLE:
     class ChatWindow(QMainWindow):
         def __init__(self):
             super().__init__()
-            self.setWindowTitle('Lab Automation Chat')
+            self.setWindowTitle('Lab Chat')
             # Size window to ~75% of available screen
             try:
                 screen = QGuiApplication.primaryScreen()
@@ -368,8 +422,9 @@ if PYQT_AVAILABLE:
             self._append_text("Use bench.config.* to manage real/sim mode and discovery.\n")
             self._append_text("Use bench.<inst>.raw <SCPI> for raw instrument commands in real mode.\n")
             self._append_text(
-                "Plot: plot bc.sg.measure frequency — scalar; plot list data — 1D; "
-                "plot bc.osc.get_trace 1 after bc.osc.run — time vs voltage (plot(...) still works).\n"
+                "Plot: plot bc.sg.measure frequency — scalar; 1D/2D series go to logs/plot_data/*.csv "
+                '(optional name: plot "Test Data" bc.osc.get_trace 1); '
+                "plot bc.osc.get_trace 1 after bc.osc.run (plot(...) still works).\n"
             )
             self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
             self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
@@ -1075,8 +1130,19 @@ if PYQT_AVAILABLE:
             self._append_text(f'\n{response}\n\n')
 
     def main():
+        _windows_set_app_user_model_id()
         app = QApplication(sys.argv)
+        app.setApplicationName('LabAutomationChat')
+        app.setApplicationDisplayName('Lab Chat')
+        icon_path = _gui_app_icon_path_preferred()
+        if icon_path:
+            app_icon = QIcon(icon_path)
+            app.setWindowIcon(app_icon)
+        else:
+            app_icon = None
         window = ChatWindow()
+        if app_icon is not None:
+            window.setWindowIcon(app_icon)
         window.show()
         sys.exit(app.exec_())
 else:
@@ -1089,7 +1155,25 @@ else:
         class ChatWindow:
             def __init__(self):
                 self.root = tk.Tk()
-                self.root.title('Lab Automation Chat')
+                self.root.title('Lab Chat')
+                self._wm_icon_photo = None
+                d = _gui_app_assets_dir()
+                ico_p = os.path.join(d, 'lab_chat_icon.ico')
+                png_p = os.path.join(d, 'lab_chat_icon.png')
+                _icon_ok = False
+                if sys.platform == 'win32' and os.path.isfile(ico_p):
+                    try:
+                        self.root.iconbitmap(ico_p)
+                        _icon_ok = True
+                    except Exception:
+                        pass
+                if not _icon_ok and os.path.isfile(png_p):
+                    try:
+                        img = tk.PhotoImage(file=png_p)
+                        self.root.iconphoto(True, img)
+                        self._wm_icon_photo = img
+                    except Exception:
+                        pass
                 # Size window to ~75% of screen
                 try:
                     sw = self.root.winfo_screenwidth()
@@ -1201,15 +1285,16 @@ else:
                 self._delay_after_id = None
                 self._pending_step_after_id = None
 
-                self._append_text('Lab Automation Chat\n')
+                self._append_text('Lab Chat\n')
                 self._append_text("Type 'help' for available commands\n")
                 self._append_text("Type 'bench.' or 'bc.' to see command suggestions\n")
                 self._append_text("Use semicolons or Shift+Enter for multiple commands.\n")
                 self._append_text("Use bench.config.* to manage real/sim mode and discovery.\n")
                 self._append_text("Use bench.<inst>.raw <SCPI> for raw instrument commands in real mode.\n")
                 self._append_text(
-                    "Plot: plot bc.sg.measure frequency — scalar; 1D list plots vs index; "
-                    "plot bc.osc.get_trace 1 after bc.osc.run — time vs voltage (plot(...) still works).\n"
+                    "Plot: plot bc.sg.measure frequency — scalar; 1D/2D series → logs/plot_data/*.csv "
+                    '(name in filename: plot "Test Data" bc.osc.get_trace 1); '
+                    "plot bc.osc.get_trace 1 after bc.osc.run (plot(...) still works).\n"
                 )
                 self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
                 self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
@@ -1824,6 +1909,7 @@ else:
                 self._append_text(f'\n{response}\n\n')
 
         def main():
+            _windows_set_app_user_model_id()
             window = ChatWindow()
             window.root.mainloop()
     except ImportError:

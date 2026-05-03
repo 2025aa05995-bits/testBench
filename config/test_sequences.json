@@ -7,6 +7,15 @@
         "Delay 1",
         "bc.ps.off"
       ]
+    },
+    "SequencerTest": {
+      "oscTest": [
+        "\"PowerSupplyTesting\"",
+        "bc.ps.on",
+        "delay 1",
+        "bc.osc.run",
+        "plot \"voltage_time\" bc.osc.get_trace 1"
+      ]
     }
   }
 }
