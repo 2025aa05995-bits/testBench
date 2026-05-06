@@ -2,6 +2,34 @@ import re
 from typing import Optional, Dict
 
 
+def normalize_llm_command_prefix(command: str, default_top: str = "bc") -> str:
+    """
+    If a line looks like ``category.action [args...]`` but is missing ``bench.`` / ``bc.``,
+    prepend ``default_top`` (default ``bc``). LLMs often return ``osc.run`` instead of
+    ``bc.osc.run``.
+
+    Leaves unchanged: ``bench.*``, ``bc.*``, ``help``, ``plot``, ``delay``, quoted headings.
+    """
+    s = (command or "").strip()
+    if not s:
+        return s
+    sl = s.lower()
+    if sl.startswith("bench.") or sl.startswith("bc."):
+        return s
+    if sl == "help" or sl.startswith("help ") or sl.startswith("plot ") or sl.startswith("delay "):
+        return s
+    if re.match(r'^".*"\s*$', s, re.DOTALL):
+        return s
+    m = re.match(r"^([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)(\s+.*)?$", s)
+    if not m:
+        return s
+    top = (default_top or "bc").lower()
+    if top not in {"bench", "bc"}:
+        top = "bc"
+    rest = m.group(3) or ""
+    return f"{top}.{m.group(1)}.{m.group(2)}{rest}"
+
+
 class CommandParser:
     def parse(self, command: str):
         # Example: bench.ps.on True or bc.ps.on True

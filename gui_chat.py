@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 from functools import partial
 from typing import Optional
+import threading
 
 # Add src directory to path BEFORE importing testbench modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -16,9 +17,10 @@ from testbench.chat_plotting import (
     try_extract_plot_command,
     write_plot_series_csv,
 )
-from testbench.command_parser import CommandParser, handle_help
+from testbench.command_parser import CommandParser, handle_help, normalize_llm_command_prefix
 from testbench.command_registry import CommandRegistry
 from testbench._paths import default_config_file, repo_root
+from testbench.llm_chat import PROVIDER_AZURE, PROVIDER_OPENAI, llm_chat_to_plan, llm_connection_test
 
 _CONFIG_DIALOG_START = str(repo_root() / 'config')
 
@@ -185,6 +187,27 @@ def try_parse_quoted_heading(command: str):
     return inner if inner else None
 
 
+def _looks_like_direct_command(text: str) -> bool:
+    """
+    Heuristic: treat as direct commands if the last fragment begins with bench./bc.
+    or the line is an existing chat keyword (help/plot/delay) or a quoted heading.
+    """
+    t = (text or "").strip()
+    if not t:
+        return True
+    if try_parse_quoted_heading(t) is not None:
+        return True
+    tl = t.lower()
+    if tl == "help" or tl.startswith("help "):
+        return True
+    if tl.startswith("plot "):
+        return True
+    if tl.startswith("delay "):
+        return True
+    last_fragment = re.split(r"[;\n\r]+", t)[-1].strip().lower()
+    return last_fragment.startswith(("bench.", "bc."))
+
+
 class CommandCompleter:
     """Helper class to generate autocomplete suggestions."""
 
@@ -318,8 +341,9 @@ try:
         QMessageBox,
         QDialogButtonBox,
         QStyleFactory,
+        QStackedWidget,
     )
-    from PyQt5.QtCore import Qt, QEvent, QTimer
+    from PyQt5.QtCore import Qt, QEvent, QTimer, pyqtSignal, QObject
     from PyQt5.QtGui import QColor, QFont, QGuiApplication, QIcon, QImage, QTextCursor, QTextCharFormat
     PYQT_AVAILABLE = True
 except ImportError:
@@ -426,8 +450,14 @@ if PYQT_AVAILABLE:
     """
 
     class ChatWindow(QMainWindow):
+        # Queued delivery from LLM worker thread → GUI thread (do not use QTimer from background threads).
+        _llm_plan_ok = pyqtSignal(object, object)
+        _llm_plan_err = pyqtSignal(str)
+
         def __init__(self):
             super().__init__()
+            self._llm_plan_ok.connect(self._on_llm_plan_ok)
+            self._llm_plan_err.connect(self._on_llm_plan_err)
             self.setWindowTitle('Lab Automation Chat')
             # Size window to ~75% of available screen
             try:
@@ -466,6 +496,8 @@ if PYQT_AVAILABLE:
             settings_menu = self.menuBar().addMenu('Settings')
             settings_action = settings_menu.addAction('Bench Settings')
             settings_action.triggered.connect(self.open_bench_settings)
+            llm_action = settings_menu.addAction('LLM settings…')
+            llm_action.triggered.connect(self.open_llm_settings)
             fonts_action = settings_menu.addAction('Fonts…')
             fonts_action.triggered.connect(self.open_font_settings)
 
@@ -1035,6 +1067,55 @@ if PYQT_AVAILABLE:
         def on_suggestion_clicked(self, item):
             self._apply_suggestion(item.text())
 
+        def _on_llm_plan_err(self, msg: str) -> None:
+            self._append_error(f"{msg}\n\n")
+
+        def _on_llm_plan_ok(self, commands, analysis) -> None:
+            analysis = str(analysis or "").strip()
+            if analysis:
+                self._append_text(f"{analysis}\n\n")
+            cmds = list(commands or [])
+            if not cmds:
+                if analysis:
+                    self._append_text("(No bench/bc commands to run — try a specific request, or type help.)\n\n")
+                else:
+                    self._append_error("LLM returned no commands.\n\n")
+                return
+
+            safe: list = []
+            for c in cmds:
+                c = normalize_llm_command_prefix((c or "").strip())
+                if not c:
+                    continue
+                if c.lower().startswith("delay ") or c.lower() == "help" or c.lower().startswith("help "):
+                    safe.append(c)
+                    continue
+                if c.lower().startswith("plot "):
+                    safe.append(c)
+                    continue
+                if try_parse_quoted_heading(c) is not None:
+                    safe.append(c)
+                    continue
+                parsed = self.parser.parse(c)
+                if not parsed:
+                    self._append_error(f"LLM produced invalid command: {c}\n\n")
+                    return
+                if parsed.get("category") == "config" or parsed.get("action") == "raw":
+                    self._append_error(
+                        f"Blocked potentially unsafe command (config/raw). Please run explicitly:\n{c}\n\n"
+                    )
+                    return
+                safe.append(c)
+
+            if not safe:
+                self._append_error("LLM produced no runnable commands.\n\n")
+                return
+
+            if self._sequence_recording:
+                self._sequence_record_buffer.extend(safe)
+            self.update_status_bar()
+            self._start_command_sequence(safe)
+
         def send_command(self):
             if self._sequence_active:
                 return
@@ -1045,11 +1126,27 @@ if PYQT_AVAILABLE:
             self.suggestions_list.hide()
             self._history_append(raw_text)
             self._history_browse_index = None
+            self.input_line.clear()
+            self.update_status_bar()
+
+            if not _looks_like_direct_command(raw_text):
+                self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+                self._append_text("Generating commands with LLM...\n")
+
+                def _bg():
+                    try:
+                        commands, analysis = llm_chat_to_plan(raw_text, self.registry)
+                    except Exception as e:
+                        self._llm_plan_err.emit(f"LLM error: {e}")
+                        return
+                    self._llm_plan_ok.emit(commands, analysis)
+
+                threading.Thread(target=_bg, daemon=True).start()
+                return
+
             commands = [cmd.strip() for cmd in re.split(r'[;\n\r]+', raw_text) if cmd.strip()]
             if self._sequence_recording:
                 self._sequence_record_buffer.extend(commands)
-            self.input_line.clear()
-            self.update_status_bar()
             if not commands:
                 return
             self._start_command_sequence(commands)
@@ -1356,6 +1453,191 @@ if PYQT_AVAILABLE:
 
             dialog.exec_()
 
+        def open_llm_settings(self) -> None:
+            cfg_mgr = self.registry.config_manager
+            config = cfg_mgr.config or {}
+            llm = (config.get('llm') or {})
+            if not isinstance(llm, dict):
+                llm = {}
+            aoai = (config.get('azure_openai') or {})
+            if not isinstance(aoai, dict):
+                aoai = {}
+            oa = (config.get('openai_api') or {})
+            if not isinstance(oa, dict):
+                oa = {}
+
+            def _timeout_spin_value() -> int:
+                for d in (llm, aoai, oa):
+                    if isinstance(d, dict) and d.get('timeout_seconds') is not None:
+                        try:
+                            return max(5, min(600, int(float(d['timeout_seconds']))))
+                        except (TypeError, ValueError):
+                            pass
+                return 60
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle('LLM settings')
+            dialog.setModal(True)
+            dialog.resize(700, 440)
+
+            layout = QVBoxLayout(dialog)
+            path = getattr(cfg_mgr, 'config_file', str(default_config_file()))
+            layout.addWidget(QLabel(f'Config: {path}'))
+            layout.addWidget(QLabel('Natural-language chat → command generation. Pick provider and credentials.'))
+
+            top_form = QFormLayout()
+            layout.addLayout(top_form)
+
+            provider_combo = QComboBox()
+            provider_combo.addItems(['Azure OpenAI', 'OpenAI (direct API)'])
+            p = str(llm.get('provider', PROVIDER_AZURE) or PROVIDER_AZURE).lower()
+            provider_combo.setCurrentIndex(1 if p == PROVIDER_OPENAI else 0)
+
+            timeout_s = QSpinBox()
+            timeout_s.setRange(5, 600)
+            timeout_s.setSuffix(' s')
+            timeout_s.setToolTip('Maximum time to wait for the model API (5–600 seconds).')
+            timeout_s.setValue(_timeout_spin_value())
+
+            top_form.addRow('Provider', provider_combo)
+            top_form.addRow('Request timeout', timeout_s)
+
+            stack = QStackedWidget()
+            layout.addWidget(stack)
+
+            page_az = QWidget()
+            lay_az = QVBoxLayout(page_az)
+            form_az = QFormLayout()
+            lay_az.addLayout(form_az)
+            az_endpoint = QLineEdit(str(aoai.get('endpoint', '') or ''))
+            az_deployment = QLineEdit(str(aoai.get('deployment', '') or ''))
+            az_api_version = QLineEdit(str(aoai.get('api_version', '2024-02-15-preview') or '2024-02-15-preview'))
+            az_api_key = QLineEdit(str(aoai.get('api_key', '') or ''))
+            az_api_key.setEchoMode(QLineEdit.Password)
+            form_az.addRow('Endpoint', az_endpoint)
+            form_az.addRow('Deployment', az_deployment)
+            form_az.addRow('API version', az_api_version)
+            form_az.addRow('API key', az_api_key)
+            stack.addWidget(page_az)
+
+            page_oa = QWidget()
+            lay_oa = QVBoxLayout(page_oa)
+            form_oa = QFormLayout()
+            lay_oa.addLayout(form_oa)
+            oa_key = QLineEdit(str(oa.get('api_key', '') or ''))
+            oa_key.setEchoMode(QLineEdit.Password)
+            oa_model = QLineEdit(str(oa.get('model', '') or 'gpt-4o-mini'))
+            oa_base = QLineEdit(str(oa.get('base_url', '') or ''))
+            form_oa.addRow('API key', oa_key)
+            form_oa.addRow('Model', oa_model)
+            form_oa.addRow('Base URL (optional)', oa_base)
+            hint_oa = QLabel(
+                'Leave base URL empty for the default OpenAI API. Set a URL for OpenAI-compatible proxies.'
+            )
+            hint_oa.setWordWrap(True)
+            lay_oa.addWidget(hint_oa)
+            stack.addWidget(page_oa)
+
+            def _sync_stack(*_args) -> None:
+                stack.setCurrentIndex(provider_combo.currentIndex())
+
+            provider_combo.currentIndexChanged.connect(_sync_stack)
+            _sync_stack()
+
+            _timeout_hint = QLabel(
+                'Timeout applies to both providers. Override via env: OPENAI_TIMEOUT_SECONDS or AZURE_OPENAI_TIMEOUT_SECONDS.'
+            )
+            _timeout_hint.setWordWrap(True)
+            layout.addWidget(_timeout_hint)
+
+            buttons = QHBoxLayout()
+            test_btn = QPushButton('Test connection')
+            test_btn.setToolTip(
+                'Runs a minimal chat request using the values above (no need to Save first).'
+            )
+            save_btn = QPushButton('Save')
+            close_btn = QPushButton('Close')
+            buttons.addWidget(test_btn)
+            buttons.addWidget(save_btn)
+            buttons.addWidget(close_btn)
+            buttons.addStretch(1)
+            layout.addLayout(buttons)
+
+            class _LlTestBridge(QObject):
+                finished = pyqtSignal(bool, str)
+
+            _test_bridge = _LlTestBridge(dialog)
+
+            def _on_test_finished(ok: bool, msg: str) -> None:
+                test_btn.setEnabled(True)
+                test_btn.setText('Test connection')
+                if ok:
+                    QMessageBox.information(dialog, 'LLM test', msg)
+                else:
+                    QMessageBox.warning(dialog, 'LLM test failed', msg)
+
+            _test_bridge.finished.connect(_on_test_finished)
+
+            def do_test_connection() -> None:
+                test_btn.setEnabled(False)
+                test_btn.setText('Testing…')
+                prov = PROVIDER_OPENAI if provider_combo.currentIndex() == 1 else PROVIDER_AZURE
+                t = float(timeout_s.value())
+
+                def _bg() -> None:
+                    try:
+                        msg = llm_connection_test(
+                            prov,
+                            t,
+                            {
+                                'endpoint': az_endpoint.text().strip(),
+                                'deployment': az_deployment.text().strip(),
+                                'api_version': az_api_version.text().strip() or '2024-02-15-preview',
+                                'api_key': az_api_key.text().strip(),
+                            },
+                            {
+                                'api_key': oa_key.text().strip(),
+                                'model': oa_model.text().strip() or 'gpt-4o-mini',
+                                'base_url': oa_base.text().strip(),
+                            },
+                        )
+                        _test_bridge.finished.emit(True, msg)
+                    except Exception as e:
+                        _test_bridge.finished.emit(False, str(e))
+
+                threading.Thread(target=_bg, daemon=True).start()
+
+            test_btn.clicked.connect(do_test_connection)
+
+            def do_save_and_close() -> None:
+                try:
+                    prov = PROVIDER_OPENAI if provider_combo.currentIndex() == 1 else PROVIDER_AZURE
+                    tsec = int(timeout_s.value())
+                    config['llm'] = {'provider': prov, 'timeout_seconds': tsec}
+                    config['azure_openai'] = {
+                        'endpoint': az_endpoint.text().strip(),
+                        'deployment': az_deployment.text().strip(),
+                        'api_version': az_api_version.text().strip() or '2024-02-15-preview',
+                        'api_key': az_api_key.text().strip(),
+                    }
+                    config['openai_api'] = {
+                        'api_key': oa_key.text().strip(),
+                        'model': oa_model.text().strip() or 'gpt-4o-mini',
+                        'base_url': oa_base.text().strip(),
+                    }
+                    cfg_mgr.config = config
+                    cfg_mgr.save_config()
+                    cfg_mgr.load_config()
+                    self._append_text('LLM settings saved.\n\n')
+                    dialog.accept()
+                except Exception as exc:
+                    QMessageBox.critical(dialog, 'Save failed', str(exc))
+
+            save_btn.clicked.connect(do_save_and_close)
+            close_btn.clicked.connect(dialog.reject)
+
+            dialog.exec_()
+
         def show_help(self):
             response = handle_help([], self.registry)
             self._append_text(f'\n{response}\n\n')
@@ -1460,6 +1742,7 @@ else:
                 settings_menu = tk.Menu(self.menu, font=self._tk_menu_font)
                 self.menu.add_cascade(label='Settings', menu=settings_menu)
                 settings_menu.add_command(label='Bench Settings', command=self.open_bench_settings)
+                settings_menu.add_command(label='LLM settings…', command=self.open_llm_settings)
                 settings_menu.add_command(label='Fonts…', command=self.open_font_settings)
 
                 help_menu = tk.Menu(self.menu, font=self._tk_menu_font)
@@ -2069,11 +2352,74 @@ else:
                 self.suggestions_list.pack_forget()
                 self._history_append(raw_text)
                 self._history_browse_index = None
+                self.input_line.delete('1.0', tk.END)
+                self.update_status_label()
+
+                if not _looks_like_direct_command(raw_text):
+                    self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+                    self._append_text("Generating commands with LLM...\n")
+
+                    def _bg():
+                        try:
+                            commands, analysis = llm_chat_to_plan(raw_text, self.registry)
+                        except Exception as e:
+                            self.root.after(0, lambda: self._append_error(f"LLM error: {e}\n\n"))
+                            return
+
+                        def _apply():
+                            if analysis:
+                                self._append_text(f"{analysis}\n\n")
+                            if not commands:
+                                if analysis:
+                                    self._append_text(
+                                        '(No bench/bc commands to run — try a specific request, or type help.)\n\n'
+                                    )
+                                else:
+                                    self._append_error("LLM returned no commands.\n\n")
+                                return
+
+                            safe: list = []
+                            for c in commands:
+                                c = normalize_llm_command_prefix((c or "").strip())
+                                if not c:
+                                    continue
+                                if c.lower().startswith("delay ") or c.lower() == "help" or c.lower().startswith("help "):
+                                    safe.append(c)
+                                    continue
+                                if c.lower().startswith("plot "):
+                                    safe.append(c)
+                                    continue
+                                if try_parse_quoted_heading(c) is not None:
+                                    safe.append(c)
+                                    continue
+                                parsed = self.parser.parse(c)
+                                if not parsed:
+                                    self._append_error(f"LLM produced invalid command: {c}\n\n")
+                                    return
+                                if parsed.get("category") == "config" or parsed.get("action") == "raw":
+                                    self._append_error(
+                                        f"Blocked potentially unsafe command (config/raw). Please run explicitly:\n{c}\n\n"
+                                    )
+                                    return
+                                safe.append(c)
+
+                            if not safe:
+                                self._append_error("LLM produced no runnable commands.\n\n")
+                                return
+
+                            if self._sequence_recording:
+                                self._sequence_record_buffer.extend(safe)
+                            self.update_status_label()
+                            self._start_command_sequence(safe)
+
+                        self.root.after(0, _apply)
+
+                    threading.Thread(target=_bg, daemon=True).start()
+                    return
+
                 commands = [cmd.strip() for cmd in re.split(r'[;\n\r]+', raw_text) if cmd.strip()]
                 if self._sequence_recording:
                     self._sequence_record_buffer.extend(commands)
-                self.input_line.delete('1.0', tk.END)
-                self.update_status_label()
                 if not commands:
                     return
                 self._start_command_sequence(commands)
@@ -2242,6 +2588,196 @@ else:
 
                 tk.Button(btn_frame, text='Save', command=do_save_and_close).pack(side='left')
                 tk.Button(btn_frame, text='Cancel', command=top.destroy).pack(side='left', padx=(8, 0))
+
+            def open_llm_settings(self):
+                top = tk.Toplevel(self.root)
+                top.title('LLM settings')
+                top.geometry('700x520')
+
+                path = getattr(self.registry.config_manager, 'config_file', str(default_config_file()))
+                tk.Label(top, text=f'Config: {path}', anchor='w').pack(fill='x', padx=8, pady=(8, 2))
+                tk.Label(
+                    top,
+                    text='Natural-language chat → command generation. Pick provider and credentials.',
+                    anchor='w',
+                ).pack(fill='x', padx=8, pady=(0, 6))
+
+                cfg = self.registry.config_manager.config or {}
+                llm = cfg.get('llm') or {}
+                if not isinstance(llm, dict):
+                    llm = {}
+                aoai = cfg.get('azure_openai') or {}
+                if not isinstance(aoai, dict):
+                    aoai = {}
+                oa = cfg.get('openai_api') or {}
+                if not isinstance(oa, dict):
+                    oa = {}
+
+                def _timeout_value() -> int:
+                    for d in (llm, aoai, oa):
+                        if isinstance(d, dict) and d.get('timeout_seconds') is not None:
+                            try:
+                                return max(5, min(600, int(float(d['timeout_seconds']))))
+                            except (TypeError, ValueError):
+                                pass
+                    return 60
+
+                prov_row = tk.Frame(top)
+                prov_row.pack(fill='x', padx=10, pady=4)
+                tk.Label(prov_row, text='Provider:', width=14, anchor='w').pack(side='left')
+                _p = str(llm.get('provider', PROVIDER_AZURE) or PROVIDER_AZURE).lower()
+                prov_var = tk.StringVar(value=PROVIDER_OPENAI if _p == PROVIDER_OPENAI else PROVIDER_AZURE)
+
+                def row(parent, label: str, value: str, show: str = None):
+                    r = tk.Frame(parent)
+                    r.pack(fill='x', pady=3)
+                    tk.Label(r, text=label, width=14, anchor='w').pack(side='left')
+                    e = tk.Entry(r, show=show) if show else tk.Entry(r)
+                    e.pack(side='left', fill='x', expand=True)
+                    e.insert(0, value or '')
+                    return e
+
+                tk.Radiobutton(
+                    prov_row, text='Azure OpenAI', variable=prov_var, value=PROVIDER_AZURE
+                ).pack(side='left', padx=(0, 12))
+                tk.Radiobutton(
+                    prov_row, text='OpenAI (direct API)', variable=prov_var, value=PROVIDER_OPENAI
+                ).pack(side='left')
+
+                rto = tk.Frame(top)
+                rto.pack(fill='x', padx=10, pady=4)
+                tk.Label(rto, text='Timeout (sec)', width=14, anchor='w').pack(side='left')
+                timeout_var = tk.StringVar(value=str(_timeout_value()))
+                tk.Spinbox(rto, from_=5, to=600, textvariable=timeout_var, width=8).pack(side='left')
+                tk.Label(rto, text='seconds', anchor='w').pack(side='left', padx=(6, 0))
+
+                body = tk.Frame(top)
+                body.pack(fill='both', expand=True, padx=10, pady=6)
+
+                azure_frm = tk.LabelFrame(body, text='Azure OpenAI', padx=8, pady=6)
+                endpoint = row(azure_frm, 'endpoint', str(aoai.get('endpoint', '') or ''))
+                deployment = row(azure_frm, 'deployment', str(aoai.get('deployment', '') or ''))
+                api_version = row(
+                    azure_frm,
+                    'api_version',
+                    str(aoai.get('api_version', '2024-02-15-preview') or '2024-02-15-preview'),
+                )
+                api_key_az = row(azure_frm, 'api_key', str(aoai.get('api_key', '') or ''), show='*')
+
+                oa_frm = tk.LabelFrame(body, text='OpenAI (direct API)', padx=8, pady=6)
+                api_key_oa = row(oa_frm, 'api_key', str(oa.get('api_key', '') or ''), show='*')
+                model_e = row(oa_frm, 'model', str(oa.get('model', '') or 'gpt-4o-mini'))
+                base_e = row(oa_frm, 'base_url', str(oa.get('base_url', '') or ''))
+                tk.Label(
+                    oa_frm,
+                    text='Leave base URL empty for default OpenAI. Optional for compatible proxies.',
+                    anchor='w',
+                    justify='left',
+                    wraplength=560,
+                ).pack(fill='x', pady=(4, 0))
+
+                def _refresh_provider_frames(*_args):
+                    if prov_var.get() == PROVIDER_OPENAI:
+                        azure_frm.pack_forget()
+                        oa_frm.pack(fill='both', expand=True)
+                    else:
+                        oa_frm.pack_forget()
+                        azure_frm.pack(fill='both', expand=True)
+
+                prov_var.trace_add('write', _refresh_provider_frames)
+                _refresh_provider_frames()
+
+                tk.Label(
+                    top,
+                    text='Timeout applies to both providers (env: OPENAI_TIMEOUT_SECONDS).',
+                    anchor='w',
+                    justify='left',
+                    wraplength=620,
+                ).pack(fill='x', padx=10, pady=(0, 4))
+
+                btnf = tk.Frame(top)
+                btnf.pack(fill='x', padx=10, pady=(0, 10))
+
+                def do_save_and_close():
+                    try:
+                        try:
+                            _tsec = int(float(timeout_var.get()))
+                        except (TypeError, ValueError):
+                            messagebox.showwarning('LLM settings', 'Invalid timeout; use 5–600 seconds.', parent=top)
+                            return
+                        _tsec = max(5, min(600, _tsec))
+                        cfg = self.registry.config_manager.config or {}
+                        prov = prov_var.get()
+                        if prov not in (PROVIDER_AZURE, PROVIDER_OPENAI):
+                            prov = PROVIDER_AZURE
+                        cfg['llm'] = {'provider': prov, 'timeout_seconds': _tsec}
+                        cfg['azure_openai'] = {
+                            'endpoint': endpoint.get().strip(),
+                            'deployment': deployment.get().strip(),
+                            'api_version': api_version.get().strip() or '2024-02-15-preview',
+                            'api_key': api_key_az.get().strip(),
+                        }
+                        cfg['openai_api'] = {
+                            'api_key': api_key_oa.get().strip(),
+                            'model': model_e.get().strip() or 'gpt-4o-mini',
+                            'base_url': base_e.get().strip(),
+                        }
+                        self.registry.config_manager.config = cfg
+                        self.registry.config_manager.save_config()
+                        self.registry.config_manager.load_config()
+                        self._append_text('LLM settings saved.\n\n')
+                        top.destroy()
+                    except Exception as exc:
+                        messagebox.showerror('Save failed', str(exc), parent=top)
+
+                def do_test_connection():
+                    try:
+                        _tsec = int(float(timeout_var.get()))
+                    except (TypeError, ValueError):
+                        messagebox.showwarning('LLM settings', 'Invalid timeout; use 5–600 seconds.', parent=top)
+                        return
+                    _tsec = max(5, min(600, _tsec))
+                    prov = prov_var.get()
+                    if prov not in (PROVIDER_AZURE, PROVIDER_OPENAI):
+                        prov = PROVIDER_AZURE
+
+                    test_b.configure(state='disabled', text='Testing…')
+
+                    def _finish_ok(m: str) -> None:
+                        test_b.configure(state='normal', text='Test connection')
+                        messagebox.showinfo('LLM test', m, parent=top)
+
+                    def _finish_err(err: str) -> None:
+                        test_b.configure(state='normal', text='Test connection')
+                        messagebox.showwarning('LLM test failed', err, parent=top)
+
+                    def _bg():
+                        try:
+                            msg = llm_connection_test(
+                                prov,
+                                float(_tsec),
+                                {
+                                    'endpoint': endpoint.get().strip(),
+                                    'deployment': deployment.get().strip(),
+                                    'api_version': api_version.get().strip() or '2024-02-15-preview',
+                                    'api_key': api_key_az.get().strip(),
+                                },
+                                {
+                                    'api_key': api_key_oa.get().strip(),
+                                    'model': model_e.get().strip() or 'gpt-4o-mini',
+                                    'base_url': base_e.get().strip(),
+                                },
+                            )
+                            self.root.after(0, lambda m=msg: _finish_ok(m))
+                        except Exception as e:
+                            self.root.after(0, lambda err=str(e): _finish_err(err))
+
+                    threading.Thread(target=_bg, daemon=True).start()
+
+                test_b = tk.Button(btnf, text='Test connection', command=do_test_connection)
+                test_b.pack(side='left')
+                tk.Button(btnf, text='Save', command=do_save_and_close).pack(side='left', padx=(8, 0))
+                tk.Button(btnf, text='Cancel', command=top.destroy).pack(side='left', padx=(8, 0))
 
             def _apply_font_preferences_tk(self) -> None:
                 fp = self._font_prefs

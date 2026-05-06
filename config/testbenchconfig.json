@@ -144,5 +144,20 @@
       "Serial",
       "USB"
     ]
+  },
+  "azure_openai": {
+    "endpoint": "https://2025a-moub30vv-eastus2.cognitiveservices.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview",
+    "deployment": "gpt-4o",
+    "api_version": "2024-02-15-preview",
+    "api_key": "DbkRYPFQON3G8rcUs3MaoJz17lgBsWFYTxw7bI7dHHO2J9vRmb9eJQQJ99CEACHYHv6XJ3w3AAAAACOGSDHd"
+  },
+  "llm": {
+    "provider": "azure_openai",
+    "timeout_seconds": 5
+  },
+  "openai_api": {
+    "api_key": "",
+    "model": "gpt-4o-mini",
+    "base_url": ""
   }
 }

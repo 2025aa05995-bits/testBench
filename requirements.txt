@@ -1,7 +1,11 @@
+# Runtime — Lab Automation Chat (gui_chat.py) and bench
 PyQt5>=5.15.0
 matplotlib>=3.7.0
 Pillow>=10.0.0
-# Development dependencies
+# Natural-language → bench commands (Azure OpenAI or direct OpenAI API); same venv as the GUI
+openai>=1.40.0
+
+# Development
 pytest>=7.0.0
 pytest-cov>=4.0.0
 black>=23.0.0
