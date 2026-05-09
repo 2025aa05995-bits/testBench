@@ -161,6 +161,16 @@
     "model": "gpt-4o-mini",
     "base_url": ""
   },
+  "local_gguf": {
+    "model_path": "",
+    "n_ctx": 4096,
+    "n_threads": 0,
+    "n_gpu_layers": 0,
+    "n_batch": 256,
+    "max_tokens": 1024,
+    "chat_format": "auto",
+    "verbose": false
+  },
   "rag": {
     "enabled": true,
     "dir": "rag_docs",

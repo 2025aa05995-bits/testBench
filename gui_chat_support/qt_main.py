@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QStyleFactory,
     QStackedWidget,
+    QSizePolicy,
 )
 from PyQt5.QtCore import Qt, QEvent, QTimer, pyqtSignal, QObject
 from PyQt5.QtGui import QColor, QFont, QGuiApplication, QIcon, QImage, QTextCursor, QTextCharFormat
@@ -47,6 +48,7 @@ from testbench.command_registry import CommandRegistry
 from testbench._paths import default_config_file
 from testbench.llm_chat import (
     PROVIDER_AZURE,
+    PROVIDER_LOCAL_GGUF,
     PROVIDER_OPENAI,
     llm_analyze_results,
     llm_chat_to_plan,
@@ -1401,6 +1403,9 @@ class ChatWindow(QMainWindow):
         oa = (config.get('openai_api') or {})
         if not isinstance(oa, dict):
             oa = {}
+        lg = (config.get('local_gguf') or {})
+        if not isinstance(lg, dict):
+            lg = {}
 
         def _timeout_spin_value() -> int:
             for d in (llm, aoai, oa):
@@ -1413,8 +1418,9 @@ class ChatWindow(QMainWindow):
 
         dialog = QDialog(self)
         dialog.setWindowTitle('LLM settings')
+        dialog.setMinimumWidth(820)
         dialog.setModal(True)
-        dialog.resize(700, 440)
+        dialog.resize(880, 520)
 
         layout = QVBoxLayout(dialog)
         path = getattr(cfg_mgr, 'config_file', str(default_config_file()))
@@ -1425,9 +1431,13 @@ class ChatWindow(QMainWindow):
         layout.addLayout(top_form)
 
         provider_combo = QComboBox()
-        provider_combo.addItems(['Azure OpenAI', 'OpenAI (direct API)'])
+        provider_combo.addItems(['Azure OpenAI', 'OpenAI (direct API)', 'Local GGUF (llama.cpp)'])
+        _provider_values = [PROVIDER_AZURE, PROVIDER_OPENAI, PROVIDER_LOCAL_GGUF]
         p = str(llm.get('provider', PROVIDER_AZURE) or PROVIDER_AZURE).lower()
-        provider_combo.setCurrentIndex(1 if p == PROVIDER_OPENAI else 0)
+        try:
+            provider_combo.setCurrentIndex(_provider_values.index(p))
+        except ValueError:
+            provider_combo.setCurrentIndex(0)
 
         timeout_s = QSpinBox()
         timeout_s.setRange(5, 600)
@@ -1495,6 +1505,98 @@ class ChatWindow(QMainWindow):
         lay_oa.addWidget(hint_oa)
         stack.addWidget(page_oa)
 
+        page_lg = QWidget()
+        lay_lg = QVBoxLayout(page_lg)
+        form_lg = QFormLayout()
+        lay_lg.addLayout(form_lg)
+        lg_path = QLineEdit(str(lg.get('model_path', '') or ''))
+        lg_path.setPlaceholderText('Path to .gguf file (e.g. C:\\models\\gemma-2-2b-it-Q4_K_M.gguf)')
+        lg_path.setMinimumWidth(520)
+        lg_path.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        lg_path.setClearButtonEnabled(True)
+        lg_path.setToolTip(lg_path.text() or 'Select a .gguf model file')
+        lg_path.textChanged.connect(lambda s: lg_path.setToolTip(s or 'Select a .gguf model file'))
+        lg_browse = QPushButton('Browse…')
+
+        def _pick_gguf() -> None:
+            start = lg_path.text().strip()
+            if start and os.path.isfile(start):
+                start_dir = os.path.dirname(start)
+            else:
+                start_dir = ''
+            picked, _ = QFileDialog.getOpenFileName(
+                dialog, 'Select GGUF model', start_dir, 'GGUF models (*.gguf);;All files (*)'
+            )
+            if picked:
+                lg_path.setText(picked)
+                lg_path.setCursorPosition(len(picked))
+                lg_path.end(False)
+
+        lg_browse.clicked.connect(_pick_gguf)
+        path_row = QHBoxLayout()
+        path_row.addWidget(lg_path, 1)
+        path_row.addWidget(lg_browse, 0)
+        path_holder = QWidget()
+        path_holder.setLayout(path_row)
+        form_lg.addRow('Model file', path_holder)
+
+        lg_chat_format = QComboBox()
+        lg_chat_format.addItems(['auto', 'gemma', 'llama-3', 'llama-2', 'mistral-instruct', 'phi-3', 'qwen', 'chatml'])
+        cf_cur = str(lg.get('chat_format', 'auto') or 'auto').lower() or 'auto'
+        cf_idx = lg_chat_format.findText(cf_cur)
+        lg_chat_format.setCurrentIndex(cf_idx if cf_idx >= 0 else 0)
+        lg_chat_format.setToolTip(
+            'Prompt template. "auto" picks one based on the filename '
+            '(gemma → gemma, llama-3 → llama-3, etc.).'
+        )
+
+        lg_n_ctx = QSpinBox()
+        lg_n_ctx.setRange(256, 131072)
+        lg_n_ctx.setSingleStep(256)
+        try:
+            lg_n_ctx.setValue(int(lg.get('n_ctx', 4096) or 4096))
+        except (TypeError, ValueError):
+            lg_n_ctx.setValue(4096)
+
+        lg_n_gpu = QSpinBox()
+        lg_n_gpu.setRange(-1, 200)
+        lg_n_gpu.setToolTip('GPU layers to offload (0 = CPU only, -1 = all).')
+        try:
+            lg_n_gpu.setValue(int(lg.get('n_gpu_layers', 0) or 0))
+        except (TypeError, ValueError):
+            lg_n_gpu.setValue(0)
+
+        lg_n_threads = QSpinBox()
+        lg_n_threads.setRange(0, 128)
+        lg_n_threads.setToolTip('CPU threads (0 = auto: half of os.cpu_count()).')
+        try:
+            lg_n_threads.setValue(int(lg.get('n_threads', 0) or 0))
+        except (TypeError, ValueError):
+            lg_n_threads.setValue(0)
+
+        lg_max_tokens = QSpinBox()
+        lg_max_tokens.setRange(16, 32768)
+        lg_max_tokens.setSingleStep(64)
+        try:
+            lg_max_tokens.setValue(int(lg.get('max_tokens', 1024) or 1024))
+        except (TypeError, ValueError):
+            lg_max_tokens.setValue(1024)
+
+        form_lg.addRow('Chat format', lg_chat_format)
+        form_lg.addRow('n_ctx', lg_n_ctx)
+        form_lg.addRow('n_gpu_layers', lg_n_gpu)
+        form_lg.addRow('n_threads', lg_n_threads)
+        form_lg.addRow('max_tokens', lg_max_tokens)
+
+        hint_lg = QLabel(
+            'Runs a local .gguf model via llama-cpp-python. Install with '
+            '"pip install llama-cpp-python" (CPU) or a CUDA/Metal wheel for GPU. '
+            'Recommended for Gemma: download a Q4_K_M / Q5_K_M GGUF from Hugging Face.'
+        )
+        hint_lg.setWordWrap(True)
+        lay_lg.addWidget(hint_lg)
+        stack.addWidget(page_lg)
+
         def _sync_stack(*_args) -> None:
             stack.setCurrentIndex(provider_combo.currentIndex())
 
@@ -1535,11 +1637,26 @@ class ChatWindow(QMainWindow):
 
         _test_bridge.finished.connect(_on_test_finished)
 
+        def _current_provider_value() -> str:
+            return _provider_values[provider_combo.currentIndex()]
+
+        def _local_gguf_dict() -> dict:
+            return {
+                'model_path': lg_path.text().strip(),
+                'chat_format': lg_chat_format.currentText().strip().lower() or 'auto',
+                'n_ctx': int(lg_n_ctx.value()),
+                'n_gpu_layers': int(lg_n_gpu.value()),
+                'n_threads': int(lg_n_threads.value()),
+                'max_tokens': int(lg_max_tokens.value()),
+                'verbose': bool(lg.get('verbose', False)),
+            }
+
         def do_test_connection() -> None:
             test_btn.setEnabled(False)
             test_btn.setText('Testing…')
-            prov = PROVIDER_OPENAI if provider_combo.currentIndex() == 1 else PROVIDER_AZURE
+            prov = _current_provider_value()
             t = float(timeout_s.value())
+            local_gguf_dict = _local_gguf_dict()
 
             def _bg() -> None:
                 try:
@@ -1557,6 +1674,7 @@ class ChatWindow(QMainWindow):
                             'model': oa_model.text().strip() or 'gpt-4o-mini',
                             'base_url': oa_base.text().strip(),
                         },
+                        local_gguf_dict,
                     )
                     _test_bridge.finished.emit(True, msg)
                 except Exception as e:
@@ -1568,7 +1686,7 @@ class ChatWindow(QMainWindow):
 
         def do_save_and_close() -> None:
             try:
-                prov = PROVIDER_OPENAI if provider_combo.currentIndex() == 1 else PROVIDER_AZURE
+                prov = _current_provider_value()
                 tsec = int(timeout_s.value())
                 config['llm'] = {
                     'provider': prov,
@@ -1589,6 +1707,7 @@ class ChatWindow(QMainWindow):
                     'model': oa_model.text().strip() or 'gpt-4o-mini',
                     'base_url': oa_base.text().strip(),
                 }
+                config['local_gguf'] = _local_gguf_dict()
                 cfg_mgr.config = config
                 cfg_mgr.save_config()
                 cfg_mgr.load_config()

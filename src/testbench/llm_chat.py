@@ -10,6 +10,11 @@ from testbench.rag import _summarize_results_for_query, retrieve_for_prompt
 # Config keys
 PROVIDER_AZURE = "azure_openai"
 PROVIDER_OPENAI = "openai"
+PROVIDER_LOCAL_GGUF = "local_gguf"
+
+# Process-wide cache for the loaded llama.cpp model (heavy to construct).
+_LOCAL_GGUF_LOCK: Any = None
+_LOCAL_GGUF_CACHE: Dict[str, Any] = {}
 
 
 def _env(name: str) -> str:
@@ -198,7 +203,7 @@ def _azure_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], time
     client = AzureOpenAI(
         api_key=api_key,
         api_version=api_version,
-        azure_endpoint=endpoint,
+        azure_endpoint=_normalize_azure_endpoint(endpoint),
         timeout=timeout_sec,
     )
 
@@ -283,12 +288,214 @@ def _openai_direct_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, An
     return _parse_plan_response(content)
 
 
+_PROVIDER_ALIASES = {
+    "azure": PROVIDER_AZURE,
+    "azure_openai": PROVIDER_AZURE,
+    "aoai": PROVIDER_AZURE,
+    "openai": PROVIDER_OPENAI,
+    "openai_api": PROVIDER_OPENAI,
+    "local": PROVIDER_LOCAL_GGUF,
+    "local_gguf": PROVIDER_LOCAL_GGUF,
+    "gguf": PROVIDER_LOCAL_GGUF,
+    "llama_cpp": PROVIDER_LOCAL_GGUF,
+    "llama-cpp": PROVIDER_LOCAL_GGUF,
+}
+
+
 def _resolve_provider(cfg: Dict[str, Any]) -> str:
     llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
     p = str((llm or {}).get("provider", "") or "").strip().lower()
-    if p in (PROVIDER_AZURE, PROVIDER_OPENAI):
-        return p
-    return PROVIDER_AZURE
+    return _PROVIDER_ALIASES.get(p, PROVIDER_AZURE)
+
+
+def _local_gguf_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve ``local_gguf`` config with env fallbacks and safe defaults."""
+    raw = cfg.get("local_gguf") if isinstance(cfg, dict) else None
+    if not isinstance(raw, dict):
+        raw = {}
+    model_path = str(raw.get("model_path", "") or "").strip() or os.environ.get("LOCAL_GGUF_MODEL_PATH", "").strip()
+
+    def _int(key: str, default: int, lo: int, hi: int) -> int:
+        v = raw.get(key)
+        try:
+            n = int(v) if v is not None and not (isinstance(v, str) and not v.strip()) else default
+        except (TypeError, ValueError):
+            n = default
+        return max(lo, min(hi, n))
+
+    chat_format = str(raw.get("chat_format", "") or "").strip().lower()
+    if chat_format in {"", "auto"}:
+        cf: Optional[str] = None
+        low = model_path.lower()
+        for tag, fmt in (
+            ("gemma-3", "gemma"),
+            ("gemma-2", "gemma"),
+            ("gemma", "gemma"),
+            ("llama-3", "llama-3"),
+            ("llama3", "llama-3"),
+            ("llama-2", "llama-2"),
+            ("mistral", "mistral-instruct"),
+            ("phi-3", "phi-3"),
+            ("qwen", "qwen"),
+        ):
+            if tag in low:
+                cf = fmt
+                break
+        chat_format = cf or "chatml"
+
+    return {
+        "model_path": model_path,
+        "n_ctx": _int("n_ctx", 4096, 256, 131072),
+        "n_threads": _int("n_threads", max(1, (os.cpu_count() or 4) // 2), 1, 128),
+        "n_gpu_layers": _int("n_gpu_layers", 0, -1, 200),
+        "n_batch": _int("n_batch", 256, 32, 4096),
+        "max_tokens": _int("max_tokens", 1024, 16, 32768),
+        "chat_format": chat_format,
+        "verbose": bool(raw.get("verbose", False)),
+    }
+
+
+def _load_local_gguf_model(settings: Dict[str, Any]) -> Any:
+    """Lazily load and cache a ``llama_cpp.Llama`` instance keyed by load args."""
+    try:
+        from llama_cpp import Llama  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "llama-cpp-python is not installed. Install with:\n"
+            "  pip install llama-cpp-python\n"
+            "(GPU builds: see https://github.com/abetlen/llama-cpp-python#installation)"
+        ) from e
+
+    model_path = settings.get("model_path") or ""
+    if not model_path:
+        raise RuntimeError(
+            "No GGUF model path configured. Set local_gguf.model_path in the bench "
+            "JSON or LOCAL_GGUF_MODEL_PATH in the environment."
+        )
+    if not os.path.isfile(model_path):
+        raise RuntimeError(f"GGUF model file not found: {model_path}")
+
+    global _LOCAL_GGUF_LOCK
+    if _LOCAL_GGUF_LOCK is None:
+        import threading
+        _LOCAL_GGUF_LOCK = threading.Lock()
+
+    key_parts = (
+        os.path.abspath(model_path),
+        int(settings.get("n_ctx", 0)),
+        int(settings.get("n_threads", 0)),
+        int(settings.get("n_gpu_layers", 0)),
+        int(settings.get("n_batch", 0)),
+        str(settings.get("chat_format") or ""),
+    )
+    key = "|".join(str(x) for x in key_parts)
+    with _LOCAL_GGUF_LOCK:
+        cached = _LOCAL_GGUF_CACHE.get(key)
+        if cached is not None:
+            return cached
+        try:
+            model = Llama(
+                model_path=model_path,
+                n_ctx=int(settings.get("n_ctx", 4096)),
+                n_threads=int(settings.get("n_threads", 4)),
+                n_gpu_layers=int(settings.get("n_gpu_layers", 0)),
+                n_batch=int(settings.get("n_batch", 256)),
+                chat_format=str(settings.get("chat_format") or "chatml"),
+                verbose=bool(settings.get("verbose", False)),
+            )
+        except Exception as e:
+            raise RuntimeError(_format_local_gguf_load_error(model_path, e)) from e
+        _LOCAL_GGUF_CACHE[key] = model
+        return model
+
+
+def _format_local_gguf_load_error(model_path: str, exc: BaseException) -> str:
+    """Build a human-friendly hint for common ``Llama(...)`` failures.
+
+    The native llama.cpp loader raises C++ exceptions / NULL-deref access
+    violations when a GGUF was produced by a *newer* llama.cpp than the runtime
+    bundled with the installed ``llama-cpp-python`` wheel. This mostly hits
+    very fresh model families (e.g. Gemma 3), so we surface a concrete next
+    step instead of the raw stack trace.
+    """
+    msg = str(exc) or type(exc).__name__
+    name = os.path.basename(model_path).lower()
+    is_access_violation = "access violation" in msg.lower() or "0x0000000000000000" in msg
+    extras: List[str] = []
+    try:
+        import llama_cpp  # type: ignore
+        rt_ver = getattr(llama_cpp, "__version__", "?")
+    except Exception:
+        rt_ver = "?"
+    extras.append(f"llama-cpp-python runtime: {rt_ver}")
+
+    if "gemma-3" in name or "gemma3" in name:
+        extras.append(
+            "Gemma 3 GGUFs require a very recent llama.cpp runtime. "
+            "Upgrade with:  pip install --upgrade --prefer-binary llama-cpp-python"
+        )
+        extras.append(
+            "If the upgrade still crashes, try a Gemma 2 build instead "
+            "(e.g. gemma-2-2b-it-Q4_K_M.gguf), or a Llama-3 / Phi-3 / Qwen2.5 GGUF — "
+            "those work with older runtimes."
+        )
+    elif is_access_violation:
+        extras.append(
+            "Access-violation crashes from the loader almost always mean the GGUF "
+            "needs a newer llama.cpp than the installed wheel. "
+            "Try:  pip install --upgrade --prefer-binary llama-cpp-python"
+        )
+        extras.append("Or pick a slightly older GGUF (e.g. Q4_K_M of Llama-3, Phi-3, Qwen2.5).")
+    else:
+        extras.append(
+            "If this looks like a tokenizer or architecture error, upgrade "
+            "llama-cpp-python or pick a different GGUF."
+        )
+
+    return (
+        f"Failed to load GGUF model {model_path!r}: {msg}\n"
+        + "\n".join(f"  - {x}" for x in extras)
+    )
+
+
+def _local_gguf_chat(
+    messages: List[Dict[str, str]],
+    cfg: Dict[str, Any],
+    *,
+    temperature: float = 0.2,
+    max_tokens: Optional[int] = None,
+) -> str:
+    """Chat-completion shim around ``llama_cpp.Llama.create_chat_completion``."""
+    settings = _local_gguf_settings(cfg)
+    model = _load_local_gguf_model(settings)
+    mt = int(max_tokens if max_tokens is not None else settings.get("max_tokens", 1024))
+    try:
+        resp = model.create_chat_completion(
+            messages=messages,
+            temperature=float(temperature),
+            max_tokens=mt,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Local GGUF model error: {e}") from e
+    try:
+        return (resp["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(f"Local GGUF model returned an unexpected response: {resp!r}") from e
+
+
+def _local_gguf_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any]) -> Tuple[List[str], str]:
+    allowed = build_allowed_commands_text(registry)
+    rag_block, _ = retrieve_for_prompt(user_text or "", cfg)
+    user_content = (
+        (f"CONTEXT:\n{rag_block}\n\n" if rag_block else "")
+        + f"ALLOWED:\n{allowed}\n\nREQUEST:\n{(user_text or '').strip()}"
+    )
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": _system_prompt()},
+        {"role": "user", "content": user_content},
+    ]
+    content = _local_gguf_chat(messages, cfg, temperature=0.2)
+    return _parse_plan_response(content)
 
 
 def _ping_messages() -> List[Dict[str, str]]:
@@ -306,12 +513,37 @@ def llm_connection_test(
     timeout_seconds: float,
     azure_openai: Dict[str, Any],
     openai_api: Dict[str, Any],
+    local_gguf: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Minimal chat completion to verify endpoint, credentials, and deployment/model name.
-    Uses the same resolution rules as ``llm_chat_to_plan`` (config dicts + env fallbacks).
-    ``timeout_seconds`` is clamped 5–600.
+
+    ``provider`` is one of ``azure_openai``, ``openai``, or ``local_gguf`` (aliases accepted).
+    ``timeout_seconds`` is clamped 5–600 for cloud providers and ignored for local GGUF.
     """
+    t = max(5.0, min(600.0, float(timeout_seconds)))
+    cfg = {
+        "llm": {"provider": provider, "timeout_seconds": t},
+        "azure_openai": dict(azure_openai or {}),
+        "openai_api": dict(openai_api or {}),
+        "local_gguf": dict(local_gguf or {}),
+    }
+
+    prov_norm = _PROVIDER_ALIASES.get(str(provider).lower(), str(provider).lower())
+    if prov_norm == PROVIDER_LOCAL_GGUF:
+        settings = _local_gguf_settings(cfg)
+        try:
+            text = _local_gguf_chat(_ping_messages(), cfg, temperature=0.0, max_tokens=16)
+        except RuntimeError:
+            raise
+        return (
+            f"Local GGUF check passed.\n\n"
+            f"Model: {settings.get('model_path')}\n"
+            f"Chat format: {settings.get('chat_format')}\n"
+            f"n_ctx: {settings.get('n_ctx')} | n_gpu_layers: {settings.get('n_gpu_layers')}\n"
+            f"Response: {text!r}"
+        )
+
     try:
         from openai import AzureOpenAI, OpenAI  # type: ignore
     except Exception as e:  # pragma: no cover
@@ -319,14 +551,7 @@ def llm_connection_test(
             "OpenAI SDK not available. Install dependency: pip install openai"
         ) from e
 
-    t = max(5.0, min(600.0, float(timeout_seconds)))
-    cfg = {
-        "llm": {"provider": provider, "timeout_seconds": t},
-        "azure_openai": dict(azure_openai or {}),
-        "openai_api": dict(openai_api or {}),
-    }
-
-    if str(provider).lower() == PROVIDER_OPENAI:
+    if prov_norm == PROVIDER_OPENAI:
         oa = cfg["openai_api"]
         api_key = (str(oa.get("api_key", "") or "").strip()) or os.environ.get("OPENAI_API_KEY", "").strip()
         model = (str(oa.get("model", "") or "").strip()) or os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
@@ -382,7 +607,7 @@ def llm_connection_test(
     client = AzureOpenAI(
         api_key=api_key,
         api_version=api_version,
-        azure_endpoint=endpoint,
+        azure_endpoint=_normalize_azure_endpoint(endpoint),
         timeout=t,
     )
     try:
@@ -507,6 +732,8 @@ def _chat_completion_text(
 ) -> str:
     """Provider-aware chat completion that returns the raw assistant content."""
     provider = _resolve_provider(cfg)
+    if provider == PROVIDER_LOCAL_GGUF:
+        return _local_gguf_chat(messages, cfg, temperature=temperature)
     if provider == PROVIDER_OPENAI:
         try:
             from openai import OpenAI  # type: ignore
@@ -571,7 +798,7 @@ def _chat_completion_text(
     client = AzureOpenAI(
         api_key=api_key,
         api_version=api_version,
-        azure_endpoint=endpoint,
+        azure_endpoint=_normalize_azure_endpoint(endpoint),
         timeout=timeout_sec,
     )
     try:
@@ -638,12 +865,13 @@ def llm_chat_to_plan(user_text: str, registry: Any) -> Tuple[List[str], str]:
     """
     Dispatch to configured LLM provider. Config in bench JSON:
 
-    - ``llm.provider``: ``azure_openai`` (default) or ``openai``
+    - ``llm.provider``: ``azure_openai`` (default), ``openai``, or ``local_gguf``
     - ``llm.timeout_seconds``: optional global timeout (5–600 s)
-    - ``azure_openai.*``: endpoint, deployment, api_version, api_key, timeout_seconds (legacy)
+    - ``azure_openai.*``: endpoint, deployment, api_version, api_key
     - ``openai_api.*``: api_key, model, base_url (optional; default OpenAI cloud if base_url empty)
+    - ``local_gguf.*``: model_path, n_ctx, n_threads, n_gpu_layers, n_batch, chat_format, max_tokens
 
-    Environment fallbacks: standard Azure and OPENAI_* variables.
+    Environment fallbacks: standard Azure / ``OPENAI_*`` / ``LOCAL_GGUF_MODEL_PATH``.
     """
     cfg: Dict[str, Any] = {}
     try:
@@ -661,6 +889,8 @@ def llm_chat_to_plan(user_text: str, registry: Any) -> Tuple[List[str], str]:
     timeout_sec = _parse_timeout_seconds(llm or {}, aoai or {}, oa or {})
     provider = _resolve_provider(cfg)
 
+    if provider == PROVIDER_LOCAL_GGUF:
+        return _local_gguf_chat_to_plan(user_text, registry, cfg)
     if provider == PROVIDER_OPENAI:
         return _openai_direct_chat_to_plan(user_text, registry, cfg, timeout_sec)
     return _azure_chat_to_plan(user_text, registry, cfg, timeout_sec)

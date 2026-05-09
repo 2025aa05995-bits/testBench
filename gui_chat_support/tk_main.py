@@ -21,6 +21,7 @@ from testbench.command_registry import CommandRegistry
 from testbench._paths import default_config_file
 from testbench.llm_chat import (
     PROVIDER_AZURE,
+    PROVIDER_LOCAL_GGUF,
     PROVIDER_OPENAI,
     llm_analyze_results,
     llm_chat_to_plan,
@@ -1187,7 +1188,8 @@ try:
         def open_llm_settings(self):
             top = tk.Toplevel(self.root)
             top.title('LLM settings')
-            top.geometry('700x520')
+            top.geometry('860x560')
+            top.minsize(780, 480)
 
             path = getattr(self.registry.config_manager, 'config_file', str(default_config_file()))
             tk.Label(top, text=f'Config: {path}', anchor='w').pack(fill='x', padx=8, pady=(8, 2))
@@ -1207,6 +1209,9 @@ try:
             oa = cfg.get('openai_api') or {}
             if not isinstance(oa, dict):
                 oa = {}
+            lg = cfg.get('local_gguf') or {}
+            if not isinstance(lg, dict):
+                lg = {}
 
             def _timeout_value() -> int:
                 for d in (llm, aoai, oa):
@@ -1221,7 +1226,13 @@ try:
             prov_row.pack(fill='x', padx=10, pady=4)
             tk.Label(prov_row, text='Provider:', width=14, anchor='w').pack(side='left')
             _p = str(llm.get('provider', PROVIDER_AZURE) or PROVIDER_AZURE).lower()
-            prov_var = tk.StringVar(value=PROVIDER_OPENAI if _p == PROVIDER_OPENAI else PROVIDER_AZURE)
+            if _p == PROVIDER_OPENAI:
+                _initial = PROVIDER_OPENAI
+            elif _p == PROVIDER_LOCAL_GGUF:
+                _initial = PROVIDER_LOCAL_GGUF
+            else:
+                _initial = PROVIDER_AZURE
+            prov_var = tk.StringVar(value=_initial)
 
             def row(parent, label: str, value: str, show: str = None):
                 r = tk.Frame(parent)
@@ -1237,6 +1248,9 @@ try:
             ).pack(side='left', padx=(0, 12))
             tk.Radiobutton(
                 prov_row, text='OpenAI (direct API)', variable=prov_var, value=PROVIDER_OPENAI
+            ).pack(side='left', padx=(0, 12))
+            tk.Radiobutton(
+                prov_row, text='Local GGUF (llama.cpp)', variable=prov_var, value=PROVIDER_LOCAL_GGUF
             ).pack(side='left')
 
             rto = tk.Frame(top)
@@ -1297,12 +1311,98 @@ try:
                 wraplength=560,
             ).pack(fill='x', pady=(4, 0))
 
+            lg_frm = tk.LabelFrame(body, text='Local GGUF (llama.cpp)', padx=8, pady=6)
+
+            path_row_frm = tk.Frame(lg_frm)
+            path_row_frm.pack(fill='x', pady=3)
+            tk.Label(path_row_frm, text='model_path', width=14, anchor='w').pack(side='left')
+            lg_path_e = tk.Entry(path_row_frm, width=64)
+            lg_path_e.pack(side='left', fill='x', expand=True, ipady=2)
+            lg_path_e.insert(0, str(lg.get('model_path', '') or ''))
+            try:
+                lg_path_e.xview_moveto(1.0)
+            except Exception:
+                pass
+
+            def _pick_gguf_tk():
+                start = lg_path_e.get().strip()
+                init_dir = os.path.dirname(start) if start and os.path.isfile(start) else ''
+                picked = filedialog.askopenfilename(
+                    parent=top,
+                    title='Select GGUF model',
+                    initialdir=init_dir or None,
+                    filetypes=[('GGUF models', '*.gguf'), ('All files', '*.*')],
+                )
+                if picked:
+                    lg_path_e.delete(0, tk.END)
+                    lg_path_e.insert(0, picked)
+                    try:
+                        lg_path_e.xview_moveto(1.0)
+                    except Exception:
+                        pass
+
+            tk.Button(path_row_frm, text='Browse…', command=_pick_gguf_tk).pack(side='left', padx=(8, 0))
+
+            cf_row = tk.Frame(lg_frm)
+            cf_row.pack(fill='x', pady=3)
+            tk.Label(cf_row, text='chat_format', width=14, anchor='w').pack(side='left')
+            cf_var = tk.StringVar(value=str(lg.get('chat_format', 'auto') or 'auto').lower())
+            tk.OptionMenu(
+                cf_row,
+                cf_var,
+                'auto', 'gemma', 'llama-3', 'llama-2', 'mistral-instruct', 'phi-3', 'qwen', 'chatml',
+            ).pack(side='left')
+
+            def _spin(parent, label, value, lo, hi, step=1):
+                r = tk.Frame(parent)
+                r.pack(fill='x', pady=3)
+                tk.Label(r, text=label, width=14, anchor='w').pack(side='left')
+                v = tk.StringVar(value=str(value))
+                tk.Spinbox(r, from_=lo, to=hi, increment=step, textvariable=v, width=10).pack(side='left')
+                return v
+
+            try:
+                _ctx_d = int(lg.get('n_ctx', 4096) or 4096)
+            except (TypeError, ValueError):
+                _ctx_d = 4096
+            try:
+                _gpu_d = int(lg.get('n_gpu_layers', 0) or 0)
+            except (TypeError, ValueError):
+                _gpu_d = 0
+            try:
+                _thr_d = int(lg.get('n_threads', 0) or 0)
+            except (TypeError, ValueError):
+                _thr_d = 0
+            try:
+                _mt_d = int(lg.get('max_tokens', 1024) or 1024)
+            except (TypeError, ValueError):
+                _mt_d = 1024
+
+            n_ctx_var = _spin(lg_frm, 'n_ctx', _ctx_d, 256, 131072, 256)
+            n_gpu_var = _spin(lg_frm, 'n_gpu_layers', _gpu_d, -1, 200, 1)
+            n_threads_var = _spin(lg_frm, 'n_threads', _thr_d, 0, 128, 1)
+            max_tokens_var = _spin(lg_frm, 'max_tokens', _mt_d, 16, 32768, 64)
+
+            tk.Label(
+                lg_frm,
+                text=(
+                    'Runs a local .gguf model via llama-cpp-python '
+                    '("pip install llama-cpp-python"). For Gemma try a Q4_K_M / Q5_K_M GGUF.'
+                ),
+                anchor='w',
+                justify='left',
+                wraplength=560,
+            ).pack(fill='x', pady=(4, 0))
+
             def _refresh_provider_frames(*_args):
-                if prov_var.get() == PROVIDER_OPENAI:
-                    azure_frm.pack_forget()
+                for f in (azure_frm, oa_frm, lg_frm):
+                    f.pack_forget()
+                v = prov_var.get()
+                if v == PROVIDER_OPENAI:
                     oa_frm.pack(fill='both', expand=True)
+                elif v == PROVIDER_LOCAL_GGUF:
+                    lg_frm.pack(fill='both', expand=True)
                 else:
-                    oa_frm.pack_forget()
                     azure_frm.pack(fill='both', expand=True)
 
             prov_var.trace_add('write', _refresh_provider_frames)
@@ -1319,6 +1419,22 @@ try:
             btnf = tk.Frame(top)
             btnf.pack(fill='x', padx=10, pady=(0, 10))
 
+            def _local_gguf_dict_tk():
+                def _i(var, default):
+                    try:
+                        return int(float(var.get()))
+                    except (TypeError, ValueError):
+                        return default
+                return {
+                    'model_path': lg_path_e.get().strip(),
+                    'chat_format': cf_var.get().strip().lower() or 'auto',
+                    'n_ctx': _i(n_ctx_var, 4096),
+                    'n_gpu_layers': _i(n_gpu_var, 0),
+                    'n_threads': _i(n_threads_var, 0),
+                    'max_tokens': _i(max_tokens_var, 1024),
+                    'verbose': bool(lg.get('verbose', False)),
+                }
+
             def do_save_and_close():
                 try:
                     try:
@@ -1329,7 +1445,7 @@ try:
                     _tsec = max(5, min(600, _tsec))
                     cfg = self.registry.config_manager.config or {}
                     prov = prov_var.get()
-                    if prov not in (PROVIDER_AZURE, PROVIDER_OPENAI):
+                    if prov not in (PROVIDER_AZURE, PROVIDER_OPENAI, PROVIDER_LOCAL_GGUF):
                         prov = PROVIDER_AZURE
                     cfg['llm'] = {
                         'provider': prov,
@@ -1348,6 +1464,7 @@ try:
                         'model': model_e.get().strip() or 'gpt-4o-mini',
                         'base_url': base_e.get().strip(),
                     }
+                    cfg['local_gguf'] = _local_gguf_dict_tk()
                     self.registry.config_manager.config = cfg
                     self.registry.config_manager.save_config()
                     self.registry.config_manager.load_config()
@@ -1366,7 +1483,7 @@ try:
                     return
                 _tsec = max(5, min(600, _tsec))
                 prov = prov_var.get()
-                if prov not in (PROVIDER_AZURE, PROVIDER_OPENAI):
+                if prov not in (PROVIDER_AZURE, PROVIDER_OPENAI, PROVIDER_LOCAL_GGUF):
                     prov = PROVIDER_AZURE
 
                 test_b.configure(state='disabled', text='Testing…')
@@ -1378,6 +1495,8 @@ try:
                 def _finish_err(err: str) -> None:
                     test_b.configure(state='normal', text='Test connection')
                     messagebox.showwarning('LLM test failed', err, parent=top)
+
+                local_gguf_dict = _local_gguf_dict_tk()
 
                 def _bg():
                     try:
@@ -1395,6 +1514,7 @@ try:
                                 'model': model_e.get().strip() or 'gpt-4o-mini',
                                 'base_url': base_e.get().strip(),
                             },
+                            local_gguf_dict,
                         )
                         self.root.after(0, lambda m=msg: _finish_ok(m))
                     except Exception as e:

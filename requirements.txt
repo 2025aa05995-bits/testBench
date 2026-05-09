@@ -2,8 +2,20 @@
 PyQt5>=5.15.0
 matplotlib>=3.7.0
 Pillow>=10.0.0
+numpy>=1.24.0
+
 # Natural-language → bench commands (Azure OpenAI or direct OpenAI API); same venv as the GUI
 openai>=1.40.0
+
+# Local GGUF models (e.g. Google Gemma) via llama.cpp.
+# CPU prebuilt wheels work on Windows / macOS / Linux for Python 3.9–3.13.
+# For GPU acceleration install with the matching wheel index, e.g.:
+#   CUDA 12.1 (Windows / Linux):
+#     pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+#   Metal (macOS):
+#     pip install llama-cpp-python  # universal2 wheel uses Metal automatically
+# Then point Settings → LLM settings → Local GGUF at a .gguf file.
+llama-cpp-python>=0.3.0
 
 # Development
 pytest>=7.0.0
