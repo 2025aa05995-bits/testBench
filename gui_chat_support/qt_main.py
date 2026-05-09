@@ -63,9 +63,11 @@ from gui_chat_support.command_helpers import (
     normalize_chat_mode,
     parse_analyze_keyword,
     parse_plan_action,
+    parse_rag_keyword,
     looks_like_direct_command,
     validate_llm_commands,
 )
+from testbench.rag import index_status, reload_index, retrieve_for_prompt
 from gui_chat_support.command_completer import CommandCompleter
 from gui_chat_support.run_command import run_chat_command
 
@@ -355,6 +357,10 @@ class ChatWindow(QMainWindow):
         self._append_text(
             "LLM chat mode (above): Agent runs proposals immediately; Plan shows commands first — "
             "then type run or discard. Default can be set under Settings → LLM settings.\n"
+        )
+        self._append_text(
+            "RAG: drop reference docs in rag_docs/. Use 'rag <query>' to preview matches, "
+            "'rag reload' to reindex, 'rag status' for the current index.\n"
         )
         self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
         self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
@@ -1048,6 +1054,12 @@ class ChatWindow(QMainWindow):
             self._run_analyze_now(analyze_extra)
             return
 
+        rag_action = parse_rag_keyword(raw_text)
+        if rag_action is not None:
+            self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+            self._handle_rag_command(*rag_action)
+            return
+
         if not looks_like_direct_command(raw_text):
             self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
             self._append_text("Generating commands with LLM...\n")
@@ -1591,6 +1603,57 @@ class ChatWindow(QMainWindow):
         close_btn.clicked.connect(dialog.reject)
 
         dialog.exec_()
+
+    def _handle_rag_command(self, kind: str, query: str) -> None:
+        cfg = self.registry.config_manager.config or {}
+        if kind == "status":
+            self._append_rag_status(cfg)
+            return
+        if kind == "reload":
+            try:
+                idx = reload_index(cfg)
+            except Exception as exc:
+                self._append_error(f"RAG reload failed: {exc}\n\n")
+                return
+            if idx is None:
+                self._append_error("RAG is disabled or the docs folder is missing.\n\n")
+                return
+            self._append_text(
+                f"RAG reloaded: {idx.file_count} files, {idx.chunk_count} chunks.\n\n"
+            )
+            return
+        if kind == "query":
+            try:
+                _block, hits = retrieve_for_prompt(query, cfg)
+            except Exception as exc:
+                self._append_error(f"RAG query failed: {exc}\n\n")
+                return
+            if not hits:
+                self._append_text("(No matching RAG chunks.)\n\n")
+                return
+            self._append_text(f"RAG matches for {query!r}:\n")
+            for i, h in enumerate(hits, 1):
+                self._append_text(
+                    f"  [{i}] {h.rel_path}#chunk{h.chunk_index}  score={h.score:.2f}\n      {h.snippet}\n"
+                )
+            self._append_text("\n")
+
+    def _append_rag_status(self, cfg) -> None:
+        try:
+            info = index_status(cfg)
+        except Exception as exc:
+            self._append_error(f"RAG status failed: {exc}\n\n")
+            return
+        self._append_text(
+            "RAG status:\n"
+            f"  enabled : {info.get('enabled')}\n"
+            f"  folder  : {info.get('dir')}\n"
+            f"  exists  : {info.get('exists')}\n"
+            f"  files   : {info.get('files')}\n"
+            f"  chunks  : {info.get('chunks')}\n"
+            f"  top_k   : {info.get('top_k')}\n"
+            f"  exts    : {', '.join(info.get('extensions') or [])}\n\n"
+        )
 
     def show_help(self):
         response = handle_help([], self.registry)

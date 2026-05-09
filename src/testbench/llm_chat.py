@@ -5,6 +5,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from testbench.rag import _summarize_results_for_query, retrieve_for_prompt
+
 # Config keys
 PROVIDER_AZURE = "azure_openai"
 PROVIDER_OPENAI = "openai"
@@ -68,6 +70,27 @@ def _is_timeout_error(exc: BaseException) -> bool:
     return False
 
 
+def _normalize_azure_endpoint(url: str) -> str:
+    """Reduce an Azure OpenAI endpoint URL to ``scheme://host[:port]``.
+
+    The SDK's ``azure_endpoint`` argument expects the resource base only.
+    Users frequently paste the full request URL from the Foundry/AI Studio
+    portal (``…/openai/deployments/<dep>/chat/completions?api-version=…``);
+    we strip path and query so the request URL is always well-formed.
+    """
+    s = (url or "").strip()
+    if not s:
+        return s
+    try:
+        from urllib.parse import urlparse
+    except ImportError:  # pragma: no cover
+        return s.rstrip("/")
+    p = urlparse(s)
+    if not p.scheme or not p.netloc:
+        return s.rstrip("/")
+    return f"{p.scheme}://{p.netloc}"
+
+
 def _normalize_llm_json_text(content: str) -> str:
     """Strip markdown fences (```json ... ```) and isolate a JSON object if needed."""
     s = (content or "").strip()
@@ -106,6 +129,9 @@ def _system_prompt() -> str:
         "- Every instrument command MUST be bc.<category>.<action> or bench.<category>.<action> "
         "(e.g. bc.osc.run). Never emit bare category.action like osc.run.\n"
         "- Keep commands minimal and safe; avoid raw SCPI unless user explicitly asks.\n"
+        "- If a CONTEXT block is present, treat it as internal reference material "
+        "(SOPs, datasheets, lab notes). Use it to choose parameters and order, but "
+        "do NOT mention or quote it in the analysis text.\n"
     )
 
 
@@ -168,6 +194,7 @@ def _azure_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], time
         deployment = _env("AZURE_OPENAI_DEPLOYMENT")
 
     allowed = build_allowed_commands_text(registry)
+    rag_block, _ = retrieve_for_prompt(user_text or "", cfg)
     client = AzureOpenAI(
         api_key=api_key,
         api_version=api_version,
@@ -175,15 +202,16 @@ def _azure_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], time
         timeout=timeout_sec,
     )
 
+    user_content = (
+        (f"CONTEXT:\n{rag_block}\n\n" if rag_block else "")
+        + f"ALLOWED:\n{allowed}\n\nREQUEST:\n{(user_text or '').strip()}"
+    )
     try:
         resp = client.chat.completions.create(
             model=deployment,
             messages=[
                 {"role": "system", "content": _system_prompt()},
-                {
-                    "role": "user",
-                    "content": f"ALLOWED:\n{allowed}\n\nREQUEST:\n{(user_text or '').strip()}",
-                },
+                {"role": "user", "content": user_content},
             ],
             temperature=0.2,
             timeout=timeout_sec,
@@ -222,21 +250,23 @@ def _openai_direct_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, An
         model = "gpt-4o-mini"
 
     allowed = build_allowed_commands_text(registry)
+    rag_block, _ = retrieve_for_prompt(user_text or "", cfg)
     kwargs: Dict[str, Any] = {"api_key": api_key, "timeout": timeout_sec}
     if base_url:
         kwargs["base_url"] = base_url.rstrip("/")
 
     client = OpenAI(**kwargs)
 
+    user_content = (
+        (f"CONTEXT:\n{rag_block}\n\n" if rag_block else "")
+        + f"ALLOWED:\n{allowed}\n\nREQUEST:\n{(user_text or '').strip()}"
+    )
     try:
         resp = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": _system_prompt()},
-                {
-                    "role": "user",
-                    "content": f"ALLOWED:\n{allowed}\n\nREQUEST:\n{(user_text or '').strip()}",
-                },
+                {"role": "user", "content": user_content},
             ],
             temperature=0.2,
             timeout=timeout_sec,
@@ -585,15 +615,20 @@ def llm_analyze_results(
 
     timeout_sec, _provider = _resolve_timeout_and_provider(cfg)
 
+    rag_query = (user_text or "").strip()
+    extra = _summarize_results_for_query(results)
+    if extra:
+        rag_query = (rag_query + "\n" + extra).strip() if rag_query else extra
+    rag_block, _hits = retrieve_for_prompt(rag_query, cfg)
+
+    user_content = (
+        (f"CONTEXT:\n{rag_block}\n\n" if rag_block else "")
+        + f"REQUEST:\n{(user_text or '').strip() or '(no original request)'}\n\n"
+        + f"RESULTS:\n{_format_results_for_prompt(results)}"
+    )
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": _analysis_system_prompt()},
-        {
-            "role": "user",
-            "content": (
-                f"REQUEST:\n{(user_text or '').strip() or '(no original request)'}\n\n"
-                f"RESULTS:\n{_format_results_for_prompt(results)}"
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
     content = _chat_completion_text(cfg, messages, timeout_sec)
     return _parse_analysis_response(content)

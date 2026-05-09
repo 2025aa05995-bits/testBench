@@ -8,6 +8,7 @@ from .command_helpers import (
     looks_like_direct_command,
     parse_analyze_keyword,
     parse_plan_action,
+    parse_rag_keyword,
     try_parse_quoted_heading,
     validate_llm_commands,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "normalize_chat_mode",
     "parse_analyze_keyword",
     "parse_plan_action",
+    "parse_rag_keyword",
     "run_chat_command",
     "try_parse_quoted_heading",
     "validate_llm_commands",

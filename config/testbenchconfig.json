@@ -160,5 +160,14 @@
     "api_key": "",
     "model": "gpt-4o-mini",
     "base_url": ""
+  },
+  "rag": {
+    "enabled": true,
+    "dir": "rag_docs",
+    "extensions": [".txt", ".md", ".markdown", ".rst", ".json", ".csv", ".log", ".py"],
+    "top_k": 4,
+    "chunk_chars": 800,
+    "chunk_overlap": 120,
+    "max_context_chars": 4000
   }
 }

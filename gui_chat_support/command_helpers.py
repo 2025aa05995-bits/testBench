@@ -29,7 +29,7 @@ def try_parse_quoted_heading(command: str):
 def looks_like_direct_command(text: str) -> bool:
     """
     Heuristic: treat as direct commands if the last fragment begins with bench./bc.
-    or the line is an existing chat keyword (help/plot/delay/analyze) or a quoted heading.
+    or the line is an existing chat keyword (help/plot/delay/analyze/rag) or a quoted heading.
     """
     t = (text or "").strip()
     if not t:
@@ -44,6 +44,8 @@ def looks_like_direct_command(text: str) -> bool:
     if tl.startswith("delay "):
         return True
     if tl == "analyze" or tl.startswith("analyze "):
+        return True
+    if tl == "rag" or tl.startswith("rag "):
         return True
     last_fragment = re.split(r"[;\n\r]+", t)[-1].strip().lower()
     return last_fragment.startswith(("bench.", "bc."))
@@ -107,3 +109,25 @@ def parse_analyze_keyword(text: str):
     if not parts or parts[0].lower() != "analyze":
         return None
     return parts[1].strip() if len(parts) > 1 else ""
+
+
+def parse_rag_keyword(text: str):
+    """Return ``("status", "")`` / ``("reload", "")`` / ``("query", q)`` for ``rag …`` lines.
+
+    Returns ``None`` if the line does not start with the ``rag`` keyword.
+    """
+    s = (text or "").strip()
+    if not s:
+        return None
+    parts = s.split(None, 1)
+    if not parts or parts[0].lower() != "rag":
+        return None
+    if len(parts) == 1:
+        return ("status", "")
+    arg = parts[1].strip()
+    low = arg.lower()
+    if low in {"status", "info"}:
+        return ("status", "")
+    if low in {"reload", "refresh", "reindex"}:
+        return ("reload", "")
+    return ("query", arg)
