@@ -3,7 +3,7 @@
 import json
 import os
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Config keys
 PROVIDER_AZURE = "azure_openai"
@@ -377,6 +377,223 @@ def llm_connection_test(
         f"Response: {text!r}\n"
         f"Request id: {rid or '(n/a)'}"
     )
+
+
+def _analysis_system_prompt() -> str:
+    return (
+        "You analyze TestBench measurement RESULTS produced by a sequence of commands.\n"
+        "Return ONLY raw JSON (no markdown, no code fences, no text before or after the object) with keys:\n"
+        '- "analysis": string — concise interpretation of the results (key observations, trends, '
+        "anomalies, units, pass/fail). Keep it short (≤6 sentences).\n"
+        '- "plot": optional object or null. If a plot helps the user, set:\n'
+        '    {"x": [..numbers..], "y": [..numbers..], "title": "...", '
+        '"xlabel": "...", "ylabel": "...", "kind": "line"|"bar"|"scatter"}\n'
+        "\n"
+        "Rules:\n"
+        "- Use ONLY values present in RESULTS — do not invent numbers.\n"
+        "- If a 1D/2D series is already present in a result, reproduce it in plot.x/plot.y.\n"
+        "- If only scalars are available across N commands, you may build a small bar chart "
+        "(one bar per scalar; use the command label or short name as x and the scalar as y).\n"
+        '- Omit "plot" or set it to null if no useful plot can be derived from RESULTS.\n'
+        '- "x" and "y" must be arrays of equal length and contain numbers only.\n'
+    )
+
+
+def _truncate_for_prompt(text: str, max_chars: int = 1500) -> str:
+    s = str(text)
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars] + f"...(truncated, {len(s) - max_chars} more chars)"
+
+
+def _format_results_for_prompt(results: List[Dict[str, Any]]) -> str:
+    """
+    Compact text block of (command -> result/error) lines for the analysis prompt.
+
+    ``results`` is a list of dicts with keys:
+    - ``command``: original command text
+    - ``result``: returned value (any JSON-serializable; truncated if huge)
+    - ``error``:  optional error message string
+    """
+    if not results:
+        return "(no results captured)"
+    lines: List[str] = []
+    for i, item in enumerate(results, 1):
+        cmd = str((item or {}).get("command", "")).strip() or "(unknown command)"
+        err = (item or {}).get("error")
+        if err:
+            lines.append(f"{i}. {cmd}\n   ERROR: {_truncate_for_prompt(err, 500)}")
+            continue
+        val = (item or {}).get("result", None)
+        try:
+            text = json.dumps(val, default=str, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = repr(val)
+        lines.append(f"{i}. {cmd}\n   RESULT: {_truncate_for_prompt(text, 1500)}")
+    return "\n".join(lines)
+
+
+def _parse_analysis_response(content: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    raw = (content or "").strip()
+    if not raw:
+        raise RuntimeError("Model returned empty analysis response.")
+    normalized = _normalize_llm_json_text(raw)
+    if not normalized:
+        raise RuntimeError("Model returned empty analysis response after stripping markdown.")
+    try:
+        payload: Dict[str, Any] = json.loads(normalized)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            "Model did not return valid JSON for analysis.\n"
+            f"Raw content:\n{raw}"
+        ) from e
+    analysis = str(payload.get("analysis", "") or "").strip()
+    plot = payload.get("plot")
+    if plot in (None, "", {}):
+        plot = None
+    elif not isinstance(plot, dict):
+        plot = None
+    return analysis, plot
+
+
+def _resolve_timeout_and_provider(cfg: Dict[str, Any]) -> Tuple[float, str]:
+    llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    aoai = cfg.get("azure_openai") if isinstance(cfg.get("azure_openai"), dict) else {}
+    oa = cfg.get("openai_api") if isinstance(cfg.get("openai_api"), dict) else {}
+    timeout_sec = _parse_timeout_seconds(llm or {}, aoai or {}, oa or {})
+    provider = _resolve_provider(cfg)
+    return timeout_sec, provider
+
+
+def _chat_completion_text(
+    cfg: Dict[str, Any],
+    messages: List[Dict[str, str]],
+    timeout_sec: float,
+    *,
+    temperature: float = 0.2,
+) -> str:
+    """Provider-aware chat completion that returns the raw assistant content."""
+    provider = _resolve_provider(cfg)
+    if provider == PROVIDER_OPENAI:
+        try:
+            from openai import OpenAI  # type: ignore
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(
+                "OpenAI SDK not available. Install dependency: pip install openai"
+            ) from e
+        oa = cfg.get("openai_api", {}) if isinstance(cfg, dict) else {}
+        if not isinstance(oa, dict):
+            oa = {}
+        api_key = (str(oa.get("api_key", "") or "").strip()) or os.environ.get("OPENAI_API_KEY", "").strip()
+        model = (str(oa.get("model", "") or "").strip()) or os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
+        base_url = (str(oa.get("base_url", "") or "").strip()) or os.environ.get("OPENAI_BASE_URL", "").strip()
+        if not api_key:
+            api_key = _env("OPENAI_API_KEY")
+        if not model:
+            model = "gpt-4o-mini"
+        kwargs: Dict[str, Any] = {"api_key": api_key, "timeout": timeout_sec}
+        if base_url:
+            kwargs["base_url"] = base_url.rstrip("/")
+        client = OpenAI(**kwargs)
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                timeout=timeout_sec,
+            )
+        except Exception as e:
+            if _is_timeout_error(e):
+                raise RuntimeError(
+                    f"OpenAI API did not respond within {int(timeout_sec)} second(s). "
+                    "Increase timeout in LLM settings or check network."
+                ) from e
+            raise
+        return (resp.choices[0].message.content or "").strip()
+
+    try:
+        from openai import AzureOpenAI  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "OpenAI SDK not available. Install dependency: pip install openai"
+        ) from e
+    aoai = cfg.get("azure_openai", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(aoai, dict):
+        aoai = {}
+    endpoint = (str(aoai.get("endpoint", "") or "").strip()) or os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+    api_key = (str(aoai.get("api_key", "") or "").strip()) or os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+    deployment = (str(aoai.get("deployment", "") or "").strip()) or os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
+    api_version = (
+        (str(aoai.get("api_version", "") or "").strip())
+        or os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-15-preview").strip()
+    )
+    if not api_version:
+        api_version = "2024-02-15-preview"
+    if not endpoint:
+        endpoint = _env("AZURE_OPENAI_ENDPOINT")
+    if not api_key:
+        api_key = _env("AZURE_OPENAI_API_KEY")
+    if not deployment:
+        deployment = _env("AZURE_OPENAI_DEPLOYMENT")
+    client = AzureOpenAI(
+        api_key=api_key,
+        api_version=api_version,
+        azure_endpoint=endpoint,
+        timeout=timeout_sec,
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=deployment,
+            messages=messages,
+            temperature=temperature,
+            timeout=timeout_sec,
+        )
+    except Exception as e:
+        if _is_timeout_error(e):
+            raise RuntimeError(
+                f"Azure OpenAI did not respond within {int(timeout_sec)} second(s). "
+                "Increase timeout in LLM settings or check network and endpoint."
+            ) from e
+        raise
+    return (resp.choices[0].message.content or "").strip()
+
+
+def llm_analyze_results(
+    user_text: str,
+    results: List[Dict[str, Any]],
+    registry: Any,
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """
+    Send the executed-command RESULTS back to the LLM for a post-run analysis
+    and (optionally) a plot specification.
+
+    Returns ``(analysis_text, plot_spec_or_None)`` where ``plot_spec`` is a dict
+    like ``{"x": [...], "y": [...], "title": "...", "xlabel": "...", "ylabel": "...", "kind": "line"}``
+    suitable to pass to ``chat_plotting.render_plot_to_png_bytes``.
+    """
+    cfg: Dict[str, Any] = {}
+    try:
+        cfg_mgr = getattr(registry, "config_manager", None) if registry is not None else None
+        cfg = getattr(cfg_mgr, "config", {}) if cfg_mgr is not None else {}
+    except Exception:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    timeout_sec, _provider = _resolve_timeout_and_provider(cfg)
+
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": _analysis_system_prompt()},
+        {
+            "role": "user",
+            "content": (
+                f"REQUEST:\n{(user_text or '').strip() or '(no original request)'}\n\n"
+                f"RESULTS:\n{_format_results_for_prompt(results)}"
+            ),
+        },
+    ]
+    content = _chat_completion_text(cfg, messages, timeout_sec)
+    return _parse_analysis_response(content)
 
 
 def llm_chat_to_plan(user_text: str, registry: Any) -> Tuple[List[str], str]:

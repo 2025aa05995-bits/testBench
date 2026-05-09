@@ -56,7 +56,26 @@ def _as_float_list(seq: Any) -> List[float]:
     return [float(x) for x in seq]
 
 
-def _dict_xy(d: dict) -> Optional[Tuple[List[float], List[float], str, str, str, str]]:
+def _coerce_xy_for_plot(xv: Any, yv: Any) -> Optional[Tuple[List[float], List[float], List[str]]]:
+    """
+    Return ``(xs, ys, x_tick_labels)`` if ``xv``/``yv`` can plot together.
+
+    ``x_tick_labels`` is non-empty only when ``xv`` is a list of strings
+    (e.g. categorical labels for a bar chart); in that case ``xs`` is
+    ``[0, 1, ..., n-1]`` and the labels are used for axis ticks.
+    """
+    if not isinstance(xv, (list, tuple)) or not isinstance(yv, (list, tuple)):
+        return None
+    if not all(isinstance(v, numbers.Real) and not isinstance(v, bool) for v in yv):
+        return None
+    if all(isinstance(v, numbers.Real) and not isinstance(v, bool) for v in xv):
+        return _as_float_list(xv), _as_float_list(yv), []
+    if all(isinstance(v, str) for v in xv):
+        return list(range(len(xv))), _as_float_list(yv), [str(v) for v in xv]
+    return None
+
+
+def _dict_xy(d: dict) -> Optional[Tuple[List[float], List[float], str, str, str, str, List[str]]]:
     lower = {str(k).lower(): v for k, v in d.items()}
     pairs = [
         (("time_s", "voltage_v"), "Time (s)", "Voltage (V)"),
@@ -66,30 +85,64 @@ def _dict_xy(d: dict) -> Optional[Tuple[List[float], List[float], str, str, str,
     ]
     for (kx, ky), xlab, ylab in pairs:
         if kx in lower and ky in lower:
-            xv, yv = lower[kx], lower[ky]
-            if isinstance(xv, (list, tuple)) and isinstance(yv, (list, tuple)):
-                title = f"{xlab} vs {ylab}"
-                return _as_float_list(xv), _as_float_list(yv), "line", title, xlab, ylab
+            coerced = _coerce_xy_for_plot(lower[kx], lower[ky])
+            if coerced is None:
+                continue
+            xs, ys, ticks = coerced
+            title = f"{xlab} vs {ylab}"
+            return xs, ys, "line", title, xlab, ylab, ticks
     return None
 
 
-def normalize_plot_series(value: Any) -> Tuple[List[float], List[float], str, str, str, str]:
+def _apply_llm_overrides(
+    value: dict,
+    xs: List[float],
+    ys: List[float],
+    kind: str,
+    title: str,
+    xlab: str,
+    ylab: str,
+    xticks: List[str],
+) -> Tuple[List[float], List[float], str, str, str, str, List[str]]:
+    """Apply optional ``title``/``xlabel``/``ylabel``/``kind`` overrides from an LLM plot spec dict."""
+    lower = {str(k).lower(): v for k, v in value.items()}
+    title_v = lower.get("title")
+    if isinstance(title_v, str) and title_v.strip():
+        title = title_v.strip()
+    xlab_v = lower.get("xlabel", lower.get("x_label"))
+    if isinstance(xlab_v, str) and xlab_v.strip():
+        xlab = xlab_v.strip()
+    ylab_v = lower.get("ylabel", lower.get("y_label"))
+    if isinstance(ylab_v, str) and ylab_v.strip():
+        ylab = ylab_v.strip()
+    kind_v = lower.get("kind")
+    if isinstance(kind_v, str) and kind_v.strip().lower() in {"line", "bar", "scatter"}:
+        kind = kind_v.strip().lower()
+    return xs, ys, kind, title, xlab, ylab, xticks
+
+
+def normalize_plot_series(
+    value: Any,
+) -> Tuple[List[float], List[float], str, str, str, str, List[str]]:
     """
-    Returns x, y, plot_kind ('line'|'bar'|'scatter'), title_suffix, xlabel, ylabel.
+    Returns ``(x, y, plot_kind, title_suffix, xlabel, ylabel, xticks)`` where
+    ``plot_kind`` is one of ``'line'|'bar'|'scatter'`` and ``xticks`` is a
+    (possibly empty) list of categorical x-tick labels (used for bar charts
+    when the LLM supplies string labels in ``x``).
     """
     if value is None:
         raise ValueError("Plot data is None")
 
     if isinstance(value, numbers.Real) and not isinstance(value, bool):
-        return [0.0], [float(value)], "bar", "scalar", "", "value"
+        return [0.0], [float(value)], "bar", "scalar", "", "value", ["value"]
 
     if isinstance(value, dict):
         got = _dict_xy(value)
         if got:
-            xs, ys, kind, title, xlab, ylab = got
+            xs, ys, kind, title, xlab, ylab, xticks = got
             if len(xs) != len(ys):
                 raise ValueError(f"x and y length mismatch: {len(xs)} vs {len(ys)}")
-            return xs, ys, kind, title, xlab, ylab
+            return _apply_llm_overrides(value, xs, ys, kind, title, xlab, ylab, xticks)
         raise ValueError("Dict plot data needs keys like (time_s, voltage_v) or (x, y)")
 
     if isinstance(value, (list, tuple)):
@@ -100,7 +153,7 @@ def normalize_plot_series(value: Any) -> Tuple[List[float], List[float], str, st
             ):
                 xs = _as_float_list([row[0] for row in value])
                 ys = _as_float_list([row[1] for row in value])
-                return xs, ys, "line", "series", "x", "y"
+                return xs, ys, "line", "series", "x", "y", []
 
         if len(value) == 2:
             a, b = value[0], value[1]
@@ -109,22 +162,22 @@ def normalize_plot_series(value: Any) -> Tuple[List[float], List[float], str, st
                     xs, ys = _as_float_list(a), _as_float_list(b)
                     if len(xs) != len(ys):
                         raise ValueError(f"x and y length mismatch: {len(xs)} vs {len(ys)}")
-                    return xs, ys, "line", "series", "x", "y"
+                    return xs, ys, "line", "series", "x", "y", []
 
         if all(isinstance(x, numbers.Real) for x in value):
             ys = _as_float_list(value)
             xs = list(range(len(ys)))
-            return xs, ys, "line", "1D series", "index", "value"
+            return xs, ys, "line", "1D series", "index", "value", []
 
     if np is not None and isinstance(value, np.ndarray):
         if value.ndim == 1:
             ys = value.astype(float).tolist()
             xs = list(range(len(ys)))
-            return xs, ys, "line", "1D array", "index", "value"
+            return xs, ys, "line", "1D array", "index", "value", []
         if value.ndim == 2 and value.shape[1] == 2:
             xs = value[:, 0].astype(float).tolist()
             ys = value[:, 1].astype(float).tolist()
-            return xs, ys, "line", "2-column array", "x", "y"
+            return xs, ys, "line", "2-column array", "x", "y", []
 
     raise ValueError(f"Unsupported plot data type: {type(value).__name__}")
 
@@ -132,7 +185,7 @@ def normalize_plot_series(value: Any) -> Tuple[List[float], List[float], str, st
 def should_log_plot_data_as_csv(value: Any) -> bool:
     """True for 1D/2D series data; False for scalar and unplottable values."""
     try:
-        xs, ys, kind, _, _, _ = normalize_plot_series(value)
+        xs, ys, kind, _t, _xl, _yl, _ticks = normalize_plot_series(value)
     except (ValueError, TypeError):
         return False
     if kind == "bar" and len(ys) == 1:
@@ -178,7 +231,7 @@ def write_plot_series_csv(value: Any, out_path: str) -> Tuple[str, str, int]:
     """
     Write normalized x/y series to CSV. Returns (x_column_header, y_column_header, row_count).
     """
-    xs, ys, _kind, _title, xlab, ylab = normalize_plot_series(value)
+    xs, ys, _kind, _title, xlab, ylab, _ticks = normalize_plot_series(value)
     xcol = (xlab or "x").strip() or "x"
     ycol = (ylab or "y").strip() or "y"
     parent = os.path.dirname(out_path)
@@ -204,20 +257,30 @@ def render_plot_to_png_bytes(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    xs, ys, kind, title_suffix, xlab, ylab = normalize_plot_series(value)
+    xs, ys, kind, title_suffix, xlab, ylab, xticks = normalize_plot_series(value)
     if len(xs) > max_points:
         step = math.ceil(len(xs) / max_points)
         xs = xs[::step]
         ys = ys[::step]
+        if xticks and len(xticks) > max_points:
+            xticks = xticks[::step]
 
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     if kind == "bar":
-        ax.bar([0], ys, width=0.35, color="steelblue")
-        ax.set_xticks([0])
-        ax.set_xticklabels(["value"])
+        ax.bar(xs, ys, width=0.6, color="steelblue")
+        if xticks:
+            ax.set_xticks(xs)
+            ax.set_xticklabels(xticks, rotation=20 if len(xticks) > 4 else 0, ha="right")
+        elif len(ys) == 1:
+            ax.set_xticks([0])
+            ax.set_xticklabels(["value"])
         if xlab and xlab.strip():
             ax.set_xlabel(xlab)
         ax.set_ylabel(ylab or "value")
+    elif kind == "scatter":
+        ax.scatter(xs, ys, s=18, color="steelblue")
+        ax.set_xlabel(xlab or "x")
+        ax.set_ylabel(ylab or "y")
     else:
         ax.plot(xs, ys, "-", linewidth=1.2, color="steelblue")
         ax.set_xlabel(xlab or "x")

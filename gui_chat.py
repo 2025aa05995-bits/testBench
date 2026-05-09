@@ -20,7 +20,13 @@ from testbench.chat_plotting import (
 from testbench.command_parser import CommandParser, handle_help, normalize_llm_command_prefix
 from testbench.command_registry import CommandRegistry
 from testbench._paths import default_config_file, repo_root
-from testbench.llm_chat import PROVIDER_AZURE, PROVIDER_OPENAI, llm_chat_to_plan, llm_connection_test
+from testbench.llm_chat import (
+    PROVIDER_AZURE,
+    PROVIDER_OPENAI,
+    llm_analyze_results,
+    llm_chat_to_plan,
+    llm_connection_test,
+)
 
 _CONFIG_DIALOG_START = str(repo_root() / 'config')
 
@@ -190,7 +196,7 @@ def try_parse_quoted_heading(command: str):
 def _looks_like_direct_command(text: str) -> bool:
     """
     Heuristic: treat as direct commands if the last fragment begins with bench./bc.
-    or the line is an existing chat keyword (help/plot/delay) or a quoted heading.
+    or the line is an existing chat keyword (help/plot/delay/analyze) or a quoted heading.
     """
     t = (text or "").strip()
     if not t:
@@ -204,8 +210,29 @@ def _looks_like_direct_command(text: str) -> bool:
         return True
     if tl.startswith("delay "):
         return True
+    if tl == "analyze" or tl.startswith("analyze "):
+        return True
     last_fragment = re.split(r"[;\n\r]+", t)[-1].strip().lower()
     return last_fragment.startswith(("bench.", "bc."))
+
+
+def parse_analyze_keyword(text: str):
+    """
+    Return the optional extra-prompt text if ``text`` is ``analyze`` (with optional
+    trailing prompt), or ``None`` if ``text`` isn't an analyze keyword.
+
+    Examples:
+    - ``analyze`` → ``""``
+    - ``analyze look for drift`` → ``"look for drift"``
+    - ``bc.ps.on True`` → ``None``
+    """
+    s = (text or "").strip()
+    if not s:
+        return None
+    parts = s.split(None, 1)
+    if not parts or parts[0].lower() != "analyze":
+        return None
+    return parts[1].strip() if len(parts) > 1 else ""
 
 
 class CommandCompleter:
@@ -250,8 +277,32 @@ def run_chat_command(
     append_error,
     append_heading,
     append_plot_from_data,
+    record_result=None,
 ) -> None:
-    """Run a single user command: help, quoted heading, plot, or bench/bc."""
+    """
+    Run a single user command: help, quoted heading, plot, or bench/bc.
+
+    If ``record_result`` is provided, it is invoked once per executable command:
+
+    - on success: ``record_result(command, result=<value>)``
+    - on failure: ``record_result(command, error=<str>)``
+
+    Pure UI commands (``help``, quoted headings, parse errors) are not recorded.
+    """
+    def _emit_result(value) -> None:
+        if record_result is not None:
+            try:
+                record_result(command, result=value)
+            except Exception:
+                pass
+
+    def _emit_error(err) -> None:
+        if record_result is not None:
+            try:
+                record_result(command, error=str(err))
+            except Exception:
+                pass
+
     cmd = (command or "").strip()
     if not cmd:
         return
@@ -279,6 +330,7 @@ def run_chat_command(
                 "Error: plot needs a valid bench command, e.g. plot bc.sg.measure frequency, "
                 'plot "My run" bc.osc.get_trace 1, or plot(bc.sg.measure frequency)\n\n'
             )
+            _emit_error("plot needs a valid bench command")
             return
         try:
             result = registry.execute(parsed["category"], parsed["action"], parsed["args"])
@@ -294,10 +346,13 @@ def run_chat_command(
                 append_text(f"Result: {result}\n")
             append_plot_from_data(result)
             append_text("\n")
+            _emit_result(result)
         except ValueError as e:
             append_error(f"Error: {e}\n\n")
+            _emit_error(e)
         except Exception as e:
             append_error(f"Error: {e}\n\n")
+            _emit_error(e)
         return
 
     parsed = parser.parse(cmd)
@@ -313,10 +368,13 @@ def run_chat_command(
         result = registry.execute(parsed["category"], parsed["action"], parsed["args"])
         response = "OK" if result is None else str(result)
         append_text(f"Result: {response}\n\n")
+        _emit_result(result)
     except ValueError as e:
         append_error(f"Error: {e}\n\n")
+        _emit_error(e)
     except Exception as e:
         append_error(f"Error: {e}\n\n")
+        _emit_error(e)
 
 
 try:
@@ -453,11 +511,15 @@ if PYQT_AVAILABLE:
         # Queued delivery from LLM worker thread → GUI thread (do not use QTimer from background threads).
         _llm_plan_ok = pyqtSignal(object, object)
         _llm_plan_err = pyqtSignal(str)
+        _llm_analysis_ok = pyqtSignal(str, object)
+        _llm_analysis_err = pyqtSignal(str)
 
         def __init__(self):
             super().__init__()
             self._llm_plan_ok.connect(self._on_llm_plan_ok)
             self._llm_plan_err.connect(self._on_llm_plan_err)
+            self._llm_analysis_ok.connect(self._on_llm_analysis_ok)
+            self._llm_analysis_err.connect(self._on_llm_analysis_err)
             self.setWindowTitle('Lab Automation Chat')
             # Size window to ~75% of available screen
             try:
@@ -576,6 +638,14 @@ if PYQT_AVAILABLE:
             self._sequence_index = 0
             self._sequence_recording = False
             self._sequence_record_buffer = []
+            self._sequence_origin = "user"
+            self._sequence_results: list = []
+            self._sequence_user_text = ""
+            self._pending_llm_user_text = ""
+            self._analysis_in_flight = False
+            self._sequence_stopped_by_user = False
+            self._last_results: list = []
+            self._last_results_user_text = ""
             self._test_sequences = load_test_sequences()
             self._delay_timer = QTimer(self)
             self._delay_timer.setSingleShot(True)
@@ -597,6 +667,10 @@ if PYQT_AVAILABLE:
                 "Plot: plot bc.sg.measure frequency — scalar; 1D/2D series go to logs/plot_data/*.csv "
                 '(optional name: plot "Test Data" bc.osc.get_trace 1); '
                 "plot bc.osc.get_trace 1 after bc.osc.run (plot(...) still works).\n"
+            )
+            self._append_text(
+                "Analyze: type 'analyze' to re-analyze the last sequence's results "
+                "(optionally 'analyze <follow-up question>'). LLM-generated sequences auto-analyze unless disabled in Settings → LLM settings.\n"
             )
             self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
             self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
@@ -714,7 +788,7 @@ if PYQT_AVAILABLE:
             if self._sequence_active:
                 QMessageBox.warning(self, 'Sequence running', 'Stop the current sequence before starting another.')
                 return
-            self._start_command_sequence(list(commands))
+            self._start_command_sequence(list(commands), origin="user")
 
         def _run_named_sequence(self, category: str, name: str) -> None:
             cmds = ((self._test_sequences.get('categories') or {}).get(category) or {}).get(name)
@@ -857,6 +931,7 @@ if PYQT_AVAILABLE:
         def _on_send_or_stop_clicked(self) -> None:
             if self._sequence_active:
                 self._delay_timer.stop()
+                self._sequence_stopped_by_user = True
                 self._append_text('Sequence stopped.\n\n')
                 self._finish_sequence()
             else:
@@ -869,17 +944,126 @@ if PYQT_AVAILABLE:
             self._sequence_index = 0
             self._set_run_button_sequence_mode(False)
             self.update_status_bar()
+            if self._sequence_results:
+                self._last_results = list(self._sequence_results)
+                self._last_results_user_text = self._sequence_user_text
+            self._maybe_run_post_analysis()
 
         def _on_delay_timer_done(self) -> None:
             if self._sequence_active:
                 self._run_next_sequence_step()
 
-        def _start_command_sequence(self, commands: list) -> None:
+        def _start_command_sequence(self, commands: list, origin: str = "user", user_text: str = "") -> None:
             self._sequence_active = True
             self._sequence_queue = list(commands)
             self._sequence_index = 0
+            self._sequence_origin = origin if origin in ("llm", "user") else "user"
+            self._sequence_results = []
+            self._sequence_stopped_by_user = False
+            if origin == "llm":
+                self._sequence_user_text = (user_text or "").strip()
             self._set_run_button_sequence_mode(True)
             self._run_next_sequence_step()
+
+        def _record_command_result(self, command: str, *, result=None, error=None) -> None:
+            """Capture executed-command outcomes for both auto- and manual-analysis."""
+            entry = {"command": command}
+            if error is not None:
+                entry["error"] = str(error)
+            else:
+                entry["result"] = result
+            self._sequence_results.append(entry)
+
+        def _auto_analyze_enabled(self) -> bool:
+            try:
+                cfg = self.registry.config_manager.config or {}
+                llm = cfg.get("llm") or {}
+                if not isinstance(llm, dict):
+                    return True
+                v = llm.get("auto_analyze_results", True)
+                if isinstance(v, bool):
+                    return v
+                if isinstance(v, str):
+                    return v.strip().lower() not in {"false", "0", "no", "off"}
+                return bool(v)
+            except Exception:
+                return True
+
+        def _run_analyze_now(self, extra_prompt: str = "") -> None:
+            """Manually re-analyze the most recent captured sequence results."""
+            if self._sequence_active:
+                self._append_error("Cannot analyze while a sequence is running.\n\n")
+                return
+            if self._analysis_in_flight:
+                self._append_text("(Analysis already in progress…)\n\n")
+                return
+            if not self._last_results:
+                self._append_error(
+                    "Nothing to analyze yet — run a bench/bc command or an LLM request first.\n\n"
+                )
+                return
+            extra = (extra_prompt or "").strip()
+            base = (self._last_results_user_text or "").strip()
+            if extra and base:
+                user_text = f"{base}\n\nFollow-up: {extra}"
+            else:
+                user_text = extra or base
+            results = list(self._last_results)
+            self._analysis_in_flight = True
+            self._append_text("Analyzing results with LLM...\n")
+
+            def _bg():
+                try:
+                    analysis, plot_spec = llm_analyze_results(user_text, results, self.registry)
+                except Exception as e:
+                    self._llm_analysis_err.emit(f"LLM analysis error: {e}")
+                    return
+                self._llm_analysis_ok.emit(analysis or "", plot_spec)
+
+            threading.Thread(target=_bg, daemon=True).start()
+
+        def _maybe_run_post_analysis(self) -> None:
+            """If the just-finished sequence came from an LLM plan, send results back for analysis."""
+            if self._sequence_origin != "llm":
+                return
+            if self._analysis_in_flight:
+                return
+            if not self._sequence_results:
+                return
+            if self._sequence_stopped_by_user:
+                return
+            if not self._auto_analyze_enabled():
+                return
+            user_text = self._sequence_user_text
+            results = list(self._sequence_results)
+            self._analysis_in_flight = True
+            self._append_text("Analyzing results with LLM...\n")
+
+            def _bg():
+                try:
+                    analysis, plot_spec = llm_analyze_results(user_text, results, self.registry)
+                except Exception as e:
+                    self._llm_analysis_err.emit(f"LLM analysis error: {e}")
+                    return
+                self._llm_analysis_ok.emit(analysis or "", plot_spec)
+
+            threading.Thread(target=_bg, daemon=True).start()
+
+        def _on_llm_analysis_err(self, msg: str) -> None:
+            self._analysis_in_flight = False
+            self._append_error(f"{msg}\n\n")
+
+        def _on_llm_analysis_ok(self, analysis: str, plot_spec) -> None:
+            self._analysis_in_flight = False
+            text = (analysis or "").strip()
+            if text:
+                self._append_heading("Analysis")
+                self._append_text(text + "\n\n")
+            elif plot_spec is None:
+                self._append_text("(LLM produced no analysis or plot.)\n\n")
+            if isinstance(plot_spec, dict):
+                self._append_plot_from_data(plot_spec)
+                self._append_text("\n")
 
         def _run_next_sequence_step(self) -> None:
             if not self._sequence_active:
@@ -920,6 +1104,7 @@ if PYQT_AVAILABLE:
                 self._append_error,
                 self._append_heading,
                 self._append_plot_from_data,
+                record_result=self._record_command_result,
             )
             if not self._sequence_active:
                 return
@@ -1114,7 +1299,8 @@ if PYQT_AVAILABLE:
             if self._sequence_recording:
                 self._sequence_record_buffer.extend(safe)
             self.update_status_bar()
-            self._start_command_sequence(safe)
+            self._start_command_sequence(safe, origin="llm", user_text=self._pending_llm_user_text)
+            self._pending_llm_user_text = ""
 
         def send_command(self):
             if self._sequence_active:
@@ -1129,9 +1315,16 @@ if PYQT_AVAILABLE:
             self.input_line.clear()
             self.update_status_bar()
 
+            analyze_extra = parse_analyze_keyword(raw_text)
+            if analyze_extra is not None:
+                self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+                self._run_analyze_now(analyze_extra)
+                return
+
             if not _looks_like_direct_command(raw_text):
                 self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
                 self._append_text("Generating commands with LLM...\n")
+                self._pending_llm_user_text = raw_text
 
                 def _bg():
                     try:
@@ -1149,7 +1342,7 @@ if PYQT_AVAILABLE:
                 self._sequence_record_buffer.extend(commands)
             if not commands:
                 return
-            self._start_command_sequence(commands)
+            self._start_command_sequence(commands, origin="user")
 
         def _default_char_format(self) -> QTextCharFormat:
             fmt = QTextCharFormat()
@@ -1499,8 +1692,19 @@ if PYQT_AVAILABLE:
             timeout_s.setToolTip('Maximum time to wait for the model API (5–600 seconds).')
             timeout_s.setValue(_timeout_spin_value())
 
+            auto_analyze_cb = QCheckBox('Send results back to LLM for analysis and plot')
+            auto_analyze_cb.setToolTip(
+                'After an LLM-generated sequence finishes, send the captured results back to '
+                'the model for a textual analysis and an optional plot rendered inline.'
+            )
+            _aa_cur = llm.get('auto_analyze_results', True)
+            if isinstance(_aa_cur, str):
+                _aa_cur = _aa_cur.strip().lower() not in {'false', '0', 'no', 'off'}
+            auto_analyze_cb.setChecked(bool(_aa_cur))
+
             top_form.addRow('Provider', provider_combo)
             top_form.addRow('Request timeout', timeout_s)
+            top_form.addRow('Auto-analyze', auto_analyze_cb)
 
             stack = QStackedWidget()
             layout.addWidget(stack)
@@ -1613,7 +1817,11 @@ if PYQT_AVAILABLE:
                 try:
                     prov = PROVIDER_OPENAI if provider_combo.currentIndex() == 1 else PROVIDER_AZURE
                     tsec = int(timeout_s.value())
-                    config['llm'] = {'provider': prov, 'timeout_seconds': tsec}
+                    config['llm'] = {
+                        'provider': prov,
+                        'timeout_seconds': tsec,
+                        'auto_analyze_results': bool(auto_analyze_cb.isChecked()),
+                    }
                     config['azure_openai'] = {
                         'endpoint': az_endpoint.text().strip(),
                         'deployment': az_deployment.text().strip(),
@@ -1895,6 +2103,14 @@ else:
                 self._sequence_index = 0
                 self._sequence_recording = False
                 self._sequence_record_buffer = []
+                self._sequence_origin = "user"
+                self._sequence_results: list = []
+                self._sequence_user_text = ""
+                self._pending_llm_user_text = ""
+                self._analysis_in_flight = False
+                self._sequence_stopped_by_user = False
+                self._last_results: list = []
+                self._last_results_user_text = ""
                 self._test_sequences = load_test_sequences()
                 self._delay_after_id = None
                 self._pending_step_after_id = None
@@ -1909,6 +2125,10 @@ else:
                     "Plot: plot bc.sg.measure frequency — scalar; 1D/2D series → logs/plot_data/*.csv "
                     '(name in filename: plot "Test Data" bc.osc.get_trace 1); '
                     "plot bc.osc.get_trace 1 after bc.osc.run (plot(...) still works).\n"
+                )
+                self._append_text(
+                    "Analyze: type 'analyze' to re-analyze the last sequence's results "
+                    "(optionally 'analyze <follow-up question>'). LLM-generated sequences auto-analyze unless disabled in Settings → LLM settings.\n"
                 )
                 self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
                 self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
@@ -1945,7 +2165,7 @@ else:
                 if self._sequence_active:
                     messagebox.showwarning('Sequence running', 'Stop the current sequence before starting another.')
                     return
-                self._start_command_sequence(list(commands))
+                self._start_command_sequence(list(commands), origin="user")
 
             def _run_named_sequence(self, category: str, name: str) -> None:
                 cmds = ((self._test_sequences.get('categories') or {}).get(category) or {}).get(name)
@@ -2111,6 +2331,7 @@ else:
             def _on_send_or_stop_clicked(self) -> None:
                 if self._sequence_active:
                     self._cancel_all_sequence_timers()
+                    self._sequence_stopped_by_user = True
                     self._append_text('Sequence stopped.\n\n')
                     self._finish_sequence()
                 else:
@@ -2123,6 +2344,10 @@ else:
                 self._sequence_index = 0
                 self._set_run_button_sequence_mode(False)
                 self.update_status_label()
+                if self._sequence_results:
+                    self._last_results = list(self._sequence_results)
+                    self._last_results_user_text = self._sequence_user_text
+                self._maybe_run_post_analysis()
 
             def _schedule_next_sequence_step(self, delay_ms: int = 0) -> None:
                 self._cancel_after_id('_pending_step_after_id')
@@ -2133,12 +2358,117 @@ else:
                 if self._sequence_active:
                     self._run_next_sequence_step()
 
-            def _start_command_sequence(self, commands: list) -> None:
+            def _start_command_sequence(self, commands: list, origin: str = "user", user_text: str = "") -> None:
                 self._sequence_active = True
                 self._sequence_queue = list(commands)
                 self._sequence_index = 0
+                self._sequence_origin = origin if origin in ("llm", "user") else "user"
+                self._sequence_results = []
+                self._sequence_stopped_by_user = False
+                if origin == "llm":
+                    self._sequence_user_text = (user_text or "").strip()
                 self._set_run_button_sequence_mode(True)
                 self._run_next_sequence_step()
+
+            def _record_command_result(self, command: str, *, result=None, error=None) -> None:
+                """Capture executed-command outcomes for both auto- and manual-analysis."""
+                entry = {"command": command}
+                if error is not None:
+                    entry["error"] = str(error)
+                else:
+                    entry["result"] = result
+                self._sequence_results.append(entry)
+
+            def _auto_analyze_enabled(self) -> bool:
+                try:
+                    cfg = self.registry.config_manager.config or {}
+                    llm = cfg.get("llm") or {}
+                    if not isinstance(llm, dict):
+                        return True
+                    v = llm.get("auto_analyze_results", True)
+                    if isinstance(v, bool):
+                        return v
+                    if isinstance(v, str):
+                        return v.strip().lower() not in {"false", "0", "no", "off"}
+                    return bool(v)
+                except Exception:
+                    return True
+
+            def _run_analyze_now(self, extra_prompt: str = "") -> None:
+                """Manually re-analyze the most recent captured sequence results."""
+                if self._sequence_active:
+                    self._append_error("Cannot analyze while a sequence is running.\n\n")
+                    return
+                if self._analysis_in_flight:
+                    self._append_text("(Analysis already in progress…)\n\n")
+                    return
+                if not self._last_results:
+                    self._append_error(
+                        "Nothing to analyze yet — run a bench/bc command or an LLM request first.\n\n"
+                    )
+                    return
+                extra = (extra_prompt or "").strip()
+                base = (self._last_results_user_text or "").strip()
+                if extra and base:
+                    user_text = f"{base}\n\nFollow-up: {extra}"
+                else:
+                    user_text = extra or base
+                results = list(self._last_results)
+                self._analysis_in_flight = True
+                self._append_text("Analyzing results with LLM...\n")
+
+                def _bg():
+                    try:
+                        analysis, plot_spec = llm_analyze_results(user_text, results, self.registry)
+                    except Exception as e:
+                        self.root.after(0, lambda: self._on_llm_analysis_err(f"LLM analysis error: {e}"))
+                        return
+                    self.root.after(0, lambda a=analysis or "", p=plot_spec: self._on_llm_analysis_ok(a, p))
+
+                threading.Thread(target=_bg, daemon=True).start()
+
+            def _maybe_run_post_analysis(self) -> None:
+                """If the just-finished sequence came from an LLM plan, send results back for analysis."""
+                if self._sequence_origin != "llm":
+                    return
+                if self._analysis_in_flight:
+                    return
+                if not self._sequence_results:
+                    return
+                if self._sequence_stopped_by_user:
+                    return
+                if not self._auto_analyze_enabled():
+                    return
+                user_text = self._sequence_user_text
+                results = list(self._sequence_results)
+                self._analysis_in_flight = True
+                self._append_text("Analyzing results with LLM...\n")
+
+                def _bg():
+                    try:
+                        analysis, plot_spec = llm_analyze_results(user_text, results, self.registry)
+                    except Exception as e:
+                        self.root.after(0, lambda: self._on_llm_analysis_err(f"LLM analysis error: {e}"))
+                        return
+                    self.root.after(0, lambda a=analysis or "", p=plot_spec: self._on_llm_analysis_ok(a, p))
+
+                threading.Thread(target=_bg, daemon=True).start()
+
+            def _on_llm_analysis_err(self, msg: str) -> None:
+                self._analysis_in_flight = False
+                self._append_error(f"{msg}\n\n")
+
+            def _on_llm_analysis_ok(self, analysis: str, plot_spec) -> None:
+                self._analysis_in_flight = False
+                text = (analysis or "").strip()
+                if text:
+                    self._append_heading("Analysis")
+                    self._append_text(text + "\n\n")
+                elif plot_spec is None:
+                    self._append_text("(LLM produced no analysis or plot.)\n\n")
+                if isinstance(plot_spec, dict):
+                    self._append_plot_from_data(plot_spec)
+                    self._append_text("\n")
 
             def _run_next_sequence_step(self) -> None:
                 self._pending_step_after_id = None
@@ -2181,6 +2511,7 @@ else:
                     self._append_error,
                     self._append_heading,
                     self._append_plot_from_data,
+                    record_result=self._record_command_result,
                 )
                 if not self._sequence_active:
                     return
@@ -2355,9 +2686,16 @@ else:
                 self.input_line.delete('1.0', tk.END)
                 self.update_status_label()
 
+                analyze_extra = parse_analyze_keyword(raw_text)
+                if analyze_extra is not None:
+                    self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+                    self._run_analyze_now(analyze_extra)
+                    return
+
                 if not _looks_like_direct_command(raw_text):
                     self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
                     self._append_text("Generating commands with LLM...\n")
+                    self._pending_llm_user_text = raw_text
 
                     def _bg():
                         try:
@@ -2410,7 +2748,10 @@ else:
                             if self._sequence_recording:
                                 self._sequence_record_buffer.extend(safe)
                             self.update_status_label()
-                            self._start_command_sequence(safe)
+                            self._start_command_sequence(
+                                safe, origin="llm", user_text=self._pending_llm_user_text
+                            )
+                            self._pending_llm_user_text = ""
 
                         self.root.after(0, _apply)
 
@@ -2422,7 +2763,7 @@ else:
                     self._sequence_record_buffer.extend(commands)
                 if not commands:
                     return
-                self._start_command_sequence(commands)
+                self._start_command_sequence(commands, origin="user")
 
             def _append_text(self, text: str):
                 self.chat_display.configure(state='normal')
@@ -2651,6 +2992,19 @@ else:
                 tk.Spinbox(rto, from_=5, to=600, textvariable=timeout_var, width=8).pack(side='left')
                 tk.Label(rto, text='seconds', anchor='w').pack(side='left', padx=(6, 0))
 
+                aa_row = tk.Frame(top)
+                aa_row.pack(fill='x', padx=10, pady=4)
+                _aa_default = llm.get('auto_analyze_results', True)
+                if isinstance(_aa_default, str):
+                    _aa_default = _aa_default.strip().lower() not in {'false', '0', 'no', 'off'}
+                auto_analyze_var = tk.BooleanVar(value=bool(_aa_default))
+                tk.Checkbutton(
+                    aa_row,
+                    text='Send results back to LLM for analysis and plot',
+                    variable=auto_analyze_var,
+                    anchor='w',
+                ).pack(side='left')
+
                 body = tk.Frame(top)
                 body.pack(fill='both', expand=True, padx=10, pady=6)
 
@@ -2710,7 +3064,11 @@ else:
                         prov = prov_var.get()
                         if prov not in (PROVIDER_AZURE, PROVIDER_OPENAI):
                             prov = PROVIDER_AZURE
-                        cfg['llm'] = {'provider': prov, 'timeout_seconds': _tsec}
+                        cfg['llm'] = {
+                            'provider': prov,
+                            'timeout_seconds': _tsec,
+                            'auto_analyze_results': bool(auto_analyze_var.get()),
+                        }
                         cfg['azure_openai'] = {
                             'endpoint': endpoint.get().strip(),
                             'deployment': deployment.get().strip(),
