@@ -1,4 +1,6 @@
-from typing import Dict, Any, Optional
+import math
+import random
+from typing import Dict, Any, List, Optional
 from .base import SpectrumAnalyzerBase
 
 
@@ -8,6 +10,8 @@ class SimulatedSpectrumAnalyzer(SpectrumAnalyzerBase):
     ACTIONS = {
         'start_sweep': 'Start frequency sweep',
         'stop_sweep': 'Stop frequency sweep',
+        'get_trace': 'Return frequencies (Hz) and data (dBm) for the current sweep',
+        'measure_peak': 'Return the peak frequency (Hz) and power (dBm)',
     }
 
     def __init__(self, resource_name: Optional[str] = None):
@@ -70,19 +74,51 @@ class SimulatedSpectrumAnalyzer(SpectrumAnalyzerBase):
     def measure_peak(self) -> Dict[str, Any]:
         if not self.connected:
             raise RuntimeError("Not connected")
+        # Small jitter around the configured center frequency / nominal peak power.
+        freq_jitter = self._span * 0.001 * random.gauss(0.0, 1.0)
         return {
-            'frequency': self._center_freq,
-            'power_dbm': -30.0,
+            'frequency': self._center_freq + freq_jitter,
+            'power_dbm': -30.0 + random.gauss(0.0, 0.5),
         }
 
-    def get_trace(self) -> Any:
+    def get_trace(self, num_points: int = 256) -> Dict[str, Any]:
+        """Simulated spectrum sweep: frequency (Hz) vs power (dBm).
+
+        Builds a noise floor (~-90 dBm with ±2 dBm Gaussian fluctuation) plus a
+        Gaussian peak near the configured center frequency. Each call jitters
+        the peak frequency, peak height, and per-bin noise so consecutive
+        sweeps look like real instrument data.
+        """
         if not self.connected:
             raise RuntimeError("Not connected")
+        n = max(16, min(int(num_points), 8192))
+        f0 = float(self._center_freq)
+        span = max(float(self._span), 1.0)
+        rbw = max(float(self._rbw), 1.0)
+        f_lo = f0 - span / 2.0
+        df = span / (n - 1)
+        # Per-sweep peak parameters
+        peak_freq = f0 + span * 0.001 * random.gauss(0.0, 1.0)
+        peak_dbm = -30.0 + random.gauss(0.0, 0.8)
+        noise_floor_dbm = -90.0
+        # FWHM ≈ 5×RBW (clamped to a reasonable fraction of the span)
+        fwhm = max(min(5.0 * rbw, span * 0.2), span * 0.005)
+        sigma_f = fwhm / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+        amp_db = peak_dbm - noise_floor_dbm
+        frequencies: List[float] = []
+        data: List[float] = []
+        for i in range(n):
+            f = f_lo + i * df
+            peak_db = amp_db * math.exp(-((f - peak_freq) ** 2) / (2.0 * sigma_f ** 2))
+            value = noise_floor_dbm + peak_db + random.gauss(0.0, 2.0)
+            frequencies.append(f)
+            data.append(value)
         return {
-            'center_freq': self._center_freq,
-            'span': self._span,
-            'rbw': self._rbw,
-            'data': [-20, -25, -30, -35, -40],  # Simulated trace
+            'center_freq': f0,
+            'span': span,
+            'rbw': rbw,
+            'frequencies': frequencies,
+            'data': data,
         }
 
     def status(self) -> Dict[str, Any]:
@@ -114,5 +150,10 @@ class SimulatedSpectrumAnalyzer(SpectrumAnalyzerBase):
             return self.start_sweep()
         elif action == 'stop_sweep':
             return self.stop_sweep()
+        elif action == 'get_trace':
+            n = int(args[0]) if args else 256
+            return self.get_trace(n)
+        elif action == 'measure_peak':
+            return self.measure_peak()
         else:
             raise ValueError(f"Unknown action: {action}")

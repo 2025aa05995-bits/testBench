@@ -396,6 +396,9 @@ def _analysis_system_prompt() -> str:
         "(one bar per scalar; use the command label or short name as x and the scalar as y).\n"
         '- Omit "plot" or set it to null if no useful plot can be derived from RESULTS.\n'
         '- "x" and "y" must be arrays of equal length and contain numbers only.\n'
+        '- Keep arrays short and complete (e.g. ≤ 256 points). Do not truncate '
+        'arrays mid-stream; if the source is longer, downsample so x and y end '
+        'with matching lengths.\n'
     )
 
 

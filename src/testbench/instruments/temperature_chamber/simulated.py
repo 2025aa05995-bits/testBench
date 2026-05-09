@@ -1,3 +1,4 @@
+import random
 from typing import Dict, Any, Optional
 from .base import TemperatureChamberBase
 
@@ -49,18 +50,27 @@ class SimulatedTemperatureChamber(TemperatureChamberBase):
             f"[SIMULATED] Target temperature set to {temperature_c}°C (ramping...)")
 
     def get_temperature(self) -> float:
+        """Return the current chamber temperature with realistic sensor noise.
+
+        The internal ``_current_temp`` continues to ramp deterministically toward
+        the target; a small Gaussian sensor noise (±0.05°C, larger while the
+        chamber is actively ramping) is added only to the returned reading so
+        consecutive calls vary slightly like a real PT100/thermocouple sensor.
+        """
         if not self.connected:
             raise RuntimeError("Not connected")
-        # Simulate gradual temperature change
+        # Simulate gradual temperature change with small per-step ramp jitter.
         if self._ramping:
             diff = self._target_temp - self._current_temp
             if abs(diff) > 0.1:
-                step = self._ramp_rate / 60  # Convert per-minute to per-check rate
+                # Convert per-minute to per-check rate, with mild ±5% rate variance
+                step = (self._ramp_rate / 60.0) * (1.0 + random.gauss(0.0, 0.05))
                 self._current_temp += (step if diff > 0 else -step)
             else:
                 self._current_temp = self._target_temp
                 self._ramping = False
-        return self._current_temp
+        sensor_sigma = 0.15 if self._ramping else 0.05
+        return self._current_temp + random.gauss(0.0, sensor_sigma)
 
     def wait_for_temperature(self, temperature_c: float, timeout_s: Optional[float] = None) -> None:
         if not self.connected:

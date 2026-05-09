@@ -153,7 +153,8 @@
   },
   "llm": {
     "provider": "azure_openai",
-    "timeout_seconds": 5
+    "timeout_seconds": 5,
+    "chat_mode": "plan"
   },
   "openai_api": {
     "api_key": "",

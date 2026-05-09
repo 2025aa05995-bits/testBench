@@ -1,4 +1,5 @@
 import math
+import random
 from typing import Dict, Any, Optional, List
 from .base import OscilloscopeBase
 
@@ -78,7 +79,12 @@ class SimulatedOscilloscope(OscilloscopeBase):
             f"[SIMULATED] CH{channel} {'enabled' if enabled else 'disabled'}")
 
     def get_trace(self, channel: int = 1, num_points: int = 256) -> Dict[str, List[float]]:
-        """Simulated acquisition: time (s) vs voltage (V) for plotting."""
+        """Simulated acquisition: time (s) vs voltage (V) for plotting.
+
+        Adds realistic noise to mimic a real scope: per-sample Gaussian noise
+        scaled to ~2% of the channel's volts/div, plus tiny per-sweep
+        amplitude/offset jitter so consecutive captures differ slightly.
+        """
         if not self.connected:
             raise RuntimeError("Not connected")
         if channel not in self._channel_settings:
@@ -93,11 +99,18 @@ class SimulatedOscilloscope(OscilloscopeBase):
         offset = self._channel_settings[channel]['offset']
         # Simulated 1 kHz sine, amplitude ~1 division peak
         freq_hz = 1000.0
+        # Per-sweep variability: ±0.5% amplitude, ±0.5% of vdiv DC offset jitter
+        amp = vdiv * (1.0 + random.gauss(0.0, 0.005))
+        sweep_offset = offset + random.gauss(0.0, 0.005 * vdiv)
+        # Per-sample voltage noise: ~2% of vdiv, with a small floor so flat lines
+        # also look noisy when vdiv is configured very small.
+        noise_sigma = max(0.02 * vdiv, 1e-4)
         time_s: List[float] = []
         voltage_v: List[float] = []
         for i in range(num_points):
             t = i * dt
-            v = vdiv * math.sin(2.0 * math.pi * freq_hz * t) + offset
+            v = amp * math.sin(2.0 * math.pi * freq_hz * t) + sweep_offset
+            v += random.gauss(0.0, noise_sigma)
             time_s.append(t)
             voltage_v.append(v)
         return {'time_s': time_s, 'voltage_v': voltage_v}

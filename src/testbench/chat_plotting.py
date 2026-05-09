@@ -56,6 +56,21 @@ def _as_float_list(seq: Any) -> List[float]:
     return [float(x) for x in seq]
 
 
+def _truncate_to_common_length(
+    xs: List[Any], ys: List[Any], ticks: Optional[List[str]] = None
+) -> Tuple[List[Any], List[Any], List[str]]:
+    """Trim ``xs``/``ys`` (and optional ``ticks``) to the shortest length so a
+    mismatched series (common when an LLM returns truncated arrays) still plots.
+    """
+    n = min(len(xs), len(ys))
+    if ticks:
+        n = min(n, len(ticks))
+        ticks = list(ticks)[:n]
+    else:
+        ticks = []
+    return list(xs)[:n], list(ys)[:n], ticks
+
+
 def _coerce_xy_for_plot(xv: Any, yv: Any) -> Optional[Tuple[List[float], List[float], List[str]]]:
     """
     Return ``(xs, ys, x_tick_labels)`` if ``xv``/``yv`` can plot together.
@@ -63,15 +78,24 @@ def _coerce_xy_for_plot(xv: Any, yv: Any) -> Optional[Tuple[List[float], List[fl
     ``x_tick_labels`` is non-empty only when ``xv`` is a list of strings
     (e.g. categorical labels for a bar chart); in that case ``xs`` is
     ``[0, 1, ..., n-1]`` and the labels are used for axis ticks.
+
+    If ``xv`` and ``yv`` have different lengths, both are trimmed to the
+    shortest length so callers can still render a (possibly truncated) plot.
     """
     if not isinstance(xv, (list, tuple)) or not isinstance(yv, (list, tuple)):
         return None
     if not all(isinstance(v, numbers.Real) and not isinstance(v, bool) for v in yv):
         return None
     if all(isinstance(v, numbers.Real) and not isinstance(v, bool) for v in xv):
-        return _as_float_list(xv), _as_float_list(yv), []
+        xs_f, ys_f, _ = _truncate_to_common_length(_as_float_list(xv), _as_float_list(yv))
+        return xs_f, ys_f, []
     if all(isinstance(v, str) for v in xv):
-        return list(range(len(xv))), _as_float_list(yv), [str(v) for v in xv]
+        labels = [str(v) for v in xv]
+        ys_f = _as_float_list(yv)
+        n = min(len(labels), len(ys_f))
+        labels = labels[:n]
+        ys_f = ys_f[:n]
+        return list(range(n)), ys_f, labels
     return None
 
 
@@ -81,6 +105,8 @@ def _dict_xy(d: dict) -> Optional[Tuple[List[float], List[float], str, str, str,
         (("time_s", "voltage_v"), "Time (s)", "Voltage (V)"),
         (("time", "voltage"), "Time (s)", "Voltage (V)"),
         (("t", "v"), "Time (s)", "Voltage (V)"),
+        (("frequencies", "data"), "Frequency (Hz)", "Power (dBm)"),
+        (("frequency_hz", "power_dbm"), "Frequency (Hz)", "Power (dBm)"),
         (("x", "y"), "x", "y"),
     ]
     for (kx, ky), xlab, ylab in pairs:
@@ -140,8 +166,7 @@ def normalize_plot_series(
         got = _dict_xy(value)
         if got:
             xs, ys, kind, title, xlab, ylab, xticks = got
-            if len(xs) != len(ys):
-                raise ValueError(f"x and y length mismatch: {len(xs)} vs {len(ys)}")
+            xs, ys, xticks = _truncate_to_common_length(xs, ys, xticks)
             return _apply_llm_overrides(value, xs, ys, kind, title, xlab, ylab, xticks)
         raise ValueError("Dict plot data needs keys like (time_s, voltage_v) or (x, y)")
 
@@ -160,8 +185,7 @@ def normalize_plot_series(
             if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
                 if all(isinstance(x, numbers.Real) for x in a) and all(isinstance(x, numbers.Real) for x in b):
                     xs, ys = _as_float_list(a), _as_float_list(b)
-                    if len(xs) != len(ys):
-                        raise ValueError(f"x and y length mismatch: {len(xs)} vs {len(ys)}")
+                    xs, ys, _ = _truncate_to_common_length(xs, ys)
                     return xs, ys, "line", "series", "x", "y", []
 
         if all(isinstance(x, numbers.Real) for x in value):
