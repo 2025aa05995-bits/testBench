@@ -1604,10 +1604,16 @@ class ChatWindow(QMainWindow):
         _sync_stack()
 
         _timeout_hint = QLabel(
-            'Timeout applies to both providers. Override via env: OPENAI_TIMEOUT_SECONDS or AZURE_OPENAI_TIMEOUT_SECONDS.'
+            'Cloud APIs: Request timeout is per chat request (5–600 s). '
+            'Local GGUF: same field caps total wait for load + ping (minimum 90 s); '
+            'first load often needs 30–120 s — use 180–300 s if tests time out.'
         )
         _timeout_hint.setWordWrap(True)
         layout.addWidget(_timeout_hint)
+
+        llm_test_status = QLabel('')
+        llm_test_status.setWordWrap(True)
+        layout.addWidget(llm_test_status)
 
         buttons = QHBoxLayout()
         test_btn = QPushButton('Test connection')
@@ -1630,12 +1636,33 @@ class ChatWindow(QMainWindow):
         def _on_test_finished(ok: bool, msg: str) -> None:
             test_btn.setEnabled(True)
             test_btn.setText('Test connection')
+            llm_test_status.clear()
             if ok:
                 QMessageBox.information(dialog, 'LLM test', msg)
+                return
+            needs_restart = (
+                'access violation' in msg.lower()
+                or 'restart the chat application' in msg.lower()
+                or 'load is disabled in this process' in msg.lower()
+            )
+            box = QMessageBox(dialog)
+            box.setIcon(QMessageBox.Critical if needs_restart else QMessageBox.Warning)
+            box.setWindowTitle('LLM test failed')
+            if needs_restart:
+                box.setText(
+                    'Restart the chat application before retrying.\n\n'
+                    'A native llama.cpp crash leaves the Python process in an '
+                    'unrecoverable state — no in-process fix exists.'
+                )
+                box.setInformativeText('Close this window, exit the application, '
+                                       'then launch gui_chat.py again.')
+                box.setDetailedText(msg)
             else:
-                QMessageBox.warning(dialog, 'LLM test failed', msg)
+                box.setText('LLM test failed')
+                box.setInformativeText(msg)
+            box.exec_()
 
-        _test_bridge.finished.connect(_on_test_finished)
+        _test_bridge.finished.connect(_on_test_finished, Qt.QueuedConnection)
 
         def _current_provider_value() -> str:
             return _provider_values[provider_combo.currentIndex()]
@@ -1655,14 +1682,35 @@ class ChatWindow(QMainWindow):
             test_btn.setEnabled(False)
             test_btn.setText('Testing…')
             prov = _current_provider_value()
-            t = float(timeout_s.value())
+            if prov == PROVIDER_LOCAL_GGUF:
+                llm_test_status.setText(
+                    'Local GGUF: loading model can take 30–120 s on first use — please wait…'
+                )
+            else:
+                llm_test_status.setText('Testing…')
+
+            def _watchdog() -> None:
+                if test_btn.text() == 'Testing…':
+                    test_btn.setEnabled(True)
+                    test_btn.setText('Test connection')
+                    llm_test_status.clear()
+                    QMessageBox.warning(
+                        dialog,
+                        'LLM test failed',
+                        'The connection test did not finish within 5 minutes.\n\n'
+                        'For Local GGUF: verify the .gguf path, try a smaller model, '
+                        'or increase Request timeout (try 180–300 s).',
+                    )
+
+            QTimer.singleShot(300_000, _watchdog)
+
             local_gguf_dict = _local_gguf_dict()
 
             def _bg() -> None:
                 try:
                     msg = llm_connection_test(
                         prov,
-                        t,
+                        float(timeout_s.value()),
                         {
                             'endpoint': az_endpoint.text().strip(),
                             'deployment': az_deployment.text().strip(),
@@ -1677,8 +1725,9 @@ class ChatWindow(QMainWindow):
                         local_gguf_dict,
                     )
                     _test_bridge.finished.emit(True, msg)
-                except Exception as e:
-                    _test_bridge.finished.emit(False, str(e))
+                except BaseException as e:
+                    err = str(e).strip() or type(e).__name__
+                    _test_bridge.finished.emit(False, err)
 
             threading.Thread(target=_bg, daemon=True).start()
 

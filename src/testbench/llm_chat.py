@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from testbench.rag import _summarize_results_for_query, retrieve_for_prompt
@@ -15,6 +16,11 @@ PROVIDER_LOCAL_GGUF = "local_gguf"
 # Process-wide cache for the loaded llama.cpp model (heavy to construct).
 _LOCAL_GGUF_LOCK: Any = None
 _LOCAL_GGUF_CACHE: Dict[str, Any] = {}
+
+# Set to True after the first native llama.cpp load failure in this process.
+# Once that happens the C++ heap is unreliable and every subsequent Llama(...)
+# tends to crash in the same place — the only fix is restarting the process.
+_LOCAL_GGUF_PRIOR_CRASH: bool = False
 
 
 def _env(name: str) -> str:
@@ -97,13 +103,17 @@ def _normalize_azure_endpoint(url: str) -> str:
 
 
 def _normalize_llm_json_text(content: str) -> str:
-    """Strip markdown fences (```json ... ```) and isolate a JSON object if needed."""
+    """Strip markdown fences and isolate a JSON object if one is present.
+
+    Accepts any language tag inside the fence (e.g. ``json``, ``tool_code``,
+    ``python``, ``bash``) — small local models are inconsistent about this.
+    """
     s = (content or "").strip()
     if not s:
         return s
-    fence = re.search(r"```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```", s, re.IGNORECASE)
+    fence = re.search(r"```([a-zA-Z0-9_+-]*)\s*\r?\n?([\s\S]*?)\r?\n?```", s)
     if fence:
-        s = fence.group(1).strip()
+        s = fence.group(2).strip()
     if s.startswith("{") and s.endswith("}"):
         return s
     start = s.find("{")
@@ -113,10 +123,43 @@ def _normalize_llm_json_text(content: str) -> str:
     return s
 
 
+_COMMAND_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*(?:\s+\S.*)?$")
+
+
+def _salvage_command_lines(content: str) -> List[str]:
+    """Best-effort recovery when the model emits plain command lines, not JSON.
+
+    Strips a single surrounding code fence (any language tag) and returns
+    non-empty, non-comment lines that look like ``identifier[.identifier]
+    [args...]``. Returns an empty list when the content does not look like
+    a command list (e.g. it's prose).
+    """
+    s = (content or "").strip()
+    if not s:
+        return []
+    fence = re.search(r"```([a-zA-Z0-9_+-]*)\s*\r?\n?([\s\S]*?)\r?\n?```", s)
+    if fence:
+        s = fence.group(2).strip()
+    cmds: List[str] = []
+    for raw_line in s.splitlines():
+        line = raw_line.strip().rstrip(";")
+        if not line or line.startswith("#") or line.startswith("//"):
+            continue
+        if line.endswith(":") or line.endswith("."):
+            return []
+        if not _COMMAND_LINE_RE.match(line):
+            return []
+        cmds.append(line)
+        if len(cmds) >= 32:
+            break
+    return cmds
+
+
 def _system_prompt() -> str:
     return (
         "You convert user requests into TestBench commands.\n"
-        "Return ONLY raw JSON (no markdown, no code fences, no text before or after the object) with keys:\n"
+        "Return ONLY raw JSON (no markdown, no code fences, no ```json or "
+        "```tool_code blocks, no text before or after the object) with keys:\n"
         '- "commands": array of strings\n'
         '- "analysis": string\n'
         "\n"
@@ -150,6 +193,11 @@ def _parse_plan_response(content: str) -> Tuple[List[str], str]:
     try:
         payload: Dict[str, Any] = json.loads(normalized)
     except json.JSONDecodeError as e:
+        salvaged = _salvage_command_lines(raw)
+        if salvaged:
+            return salvaged, (
+                "(recovered plain command list from non-JSON model response)"
+            )
         raise RuntimeError(
             "Model did not return valid JSON. Update the prompt or reduce temperature.\n"
             f"Raw content:\n{raw}"
@@ -315,11 +363,13 @@ def _local_gguf_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
         raw = {}
     model_path = str(raw.get("model_path", "") or "").strip() or os.environ.get("LOCAL_GGUF_MODEL_PATH", "").strip()
 
-    def _int(key: str, default: int, lo: int, hi: int) -> int:
+    def _int(key: str, default: int, lo: int, hi: int, *, zero_means_default: bool = False) -> int:
         v = raw.get(key)
         try:
             n = int(v) if v is not None and not (isinstance(v, str) and not v.strip()) else default
         except (TypeError, ValueError):
+            n = default
+        if zero_means_default and n == 0:
             n = default
         return max(lo, min(hi, n))
 
@@ -345,11 +395,17 @@ def _local_gguf_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "model_path": model_path,
-        "n_ctx": _int("n_ctx", 4096, 256, 131072),
-        "n_threads": _int("n_threads", max(1, (os.cpu_count() or 4) // 2), 1, 128),
+        "n_ctx": _int("n_ctx", 4096, 256, 131072, zero_means_default=True),
+        "n_threads": _int(
+            "n_threads",
+            max(1, (os.cpu_count() or 4) // 2),
+            1,
+            128,
+            zero_means_default=True,
+        ),
         "n_gpu_layers": _int("n_gpu_layers", 0, -1, 200),
-        "n_batch": _int("n_batch", 256, 32, 4096),
-        "max_tokens": _int("max_tokens", 1024, 16, 32768),
+        "n_batch": _int("n_batch", 256, 32, 4096, zero_means_default=True),
+        "max_tokens": _int("max_tokens", 1024, 16, 32768, zero_means_default=True),
         "chat_format": chat_format,
         "verbose": bool(raw.get("verbose", False)),
     }
@@ -357,6 +413,7 @@ def _local_gguf_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 def _load_local_gguf_model(settings: Dict[str, Any]) -> Any:
     """Lazily load and cache a ``llama_cpp.Llama`` instance keyed by load args."""
+    global _LOCAL_GGUF_LOCK, _LOCAL_GGUF_PRIOR_CRASH
     try:
         from llama_cpp import Llama  # type: ignore
     except Exception as e:  # pragma: no cover
@@ -375,7 +432,17 @@ def _load_local_gguf_model(settings: Dict[str, Any]) -> Any:
     if not os.path.isfile(model_path):
         raise RuntimeError(f"GGUF model file not found: {model_path}")
 
-    global _LOCAL_GGUF_LOCK
+    if _LOCAL_GGUF_PRIOR_CRASH:
+        raise RuntimeError(
+            "Local GGUF model load is disabled in this process because a previous "
+            "load crashed in native code (access violation).\n\n"
+            "RESTART the chat application before retrying — the C++ heap is "
+            "corrupted after a crash and any further Llama(...) call in the same "
+            "process will keep failing in the same place."
+        )
+
+    _preflight_local_gguf_memory(model_path, settings)
+
     if _LOCAL_GGUF_LOCK is None:
         import threading
         _LOCAL_GGUF_LOCK = threading.Lock()
@@ -404,19 +471,100 @@ def _load_local_gguf_model(settings: Dict[str, Any]) -> Any:
                 verbose=bool(settings.get("verbose", False)),
             )
         except Exception as e:
+            _LOCAL_GGUF_PRIOR_CRASH = True
             raise RuntimeError(_format_local_gguf_load_error(model_path, e)) from e
         _LOCAL_GGUF_CACHE[key] = model
         return model
+
+
+def _query_free_ram_bytes() -> Optional[int]:
+    """Return current free physical RAM in bytes, or None if unknown.
+
+    Uses Windows ``GlobalMemoryStatusEx`` and falls back to ``/proc/meminfo``
+    on Linux. Best-effort only; never raises.
+    """
+    try:
+        import ctypes
+
+        if hasattr(ctypes, "windll"):
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return int(stat.ullAvailPhys)
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo", "r", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _preflight_local_gguf_memory(model_path: str, settings: Dict[str, Any]) -> None:
+    """Fail fast with a friendly message when free RAM is clearly insufficient.
+
+    Estimates needed memory as ``file_size + KV cache rough + 0.4 GB scratch``.
+    A KV cache rough is ``n_ctx * 0.0001`` GB (overshoots small models slightly,
+    undershoots very wide models — close enough for an OOM warning). Skips
+    silently when free RAM cannot be determined.
+    """
+    free = _query_free_ram_bytes()
+    if free is None:
+        return
+    try:
+        file_size = os.path.getsize(model_path)
+    except OSError:
+        return
+    n_ctx = int(settings.get("n_ctx", 4096) or 4096)
+    kv_rough = int(n_ctx * 100_000)
+    scratch = 400 * 1024 * 1024
+    needed = file_size + kv_rough + scratch
+    if free + (256 * 1024 * 1024) < needed:
+        free_gb = free / (1024**3)
+        need_gb = needed / (1024**3)
+        file_gb = file_size / (1024**3)
+        raise RuntimeError(
+            "Not enough free RAM to load the GGUF safely.\n"
+            f"  - Free physical RAM: {free_gb:.2f} GB\n"
+            f"  - Estimated needed:  {need_gb:.2f} GB "
+            f"(file {file_gb:.2f} GB + KV cache @ n_ctx={n_ctx} + scratch)\n"
+            "Fix one of the following, then retry:\n"
+            "  - Lower n_ctx (try 2048), n_batch (128), max_tokens (512) in LLM settings.\n"
+            "  - Close other applications to free memory.\n"
+            "  - Use a smaller GGUF (e.g. Llama-3.2-1B-Instruct Q4_K_M, ~770 MB).\n"
+            "  - Restart the chat application before retrying (a previous crash may "
+            "have left memory mapped)."
+        )
 
 
 def _format_local_gguf_load_error(model_path: str, exc: BaseException) -> str:
     """Build a human-friendly hint for common ``Llama(...)`` failures.
 
     The native llama.cpp loader raises C++ exceptions / NULL-deref access
-    violations when a GGUF was produced by a *newer* llama.cpp than the runtime
-    bundled with the installed ``llama-cpp-python`` wheel. This mostly hits
-    very fresh model families (e.g. Gemma 3), so we surface a concrete next
-    step instead of the raw stack trace.
+    violations for two very different reasons:
+
+    1. **Out of memory** — most common on 8 GB Windows machines. The loader
+       mmaps the GGUF, fails to commit pages for the model + KV cache, and
+       dereferences NULL deep in ggml. Hints below check current free RAM
+       against a rough estimate of what the file needs.
+    2. **GGUF newer than the runtime** — e.g. Gemma 3 on the bundled
+       llama.cpp shipped with ``llama-cpp-python`` 0.3.22.
     """
     msg = str(exc) or type(exc).__name__
     name = os.path.basename(model_path).lower()
@@ -429,24 +577,84 @@ def _format_local_gguf_load_error(model_path: str, exc: BaseException) -> str:
         rt_ver = "?"
     extras.append(f"llama-cpp-python runtime: {rt_ver}")
 
+    free_gb: Optional[float] = None
+    file_gb: Optional[float] = None
+    try:
+        if os.path.isfile(model_path):
+            file_gb = os.path.getsize(model_path) / (1024**3)
+    except OSError:
+        pass
+    try:
+        import ctypes
+
+        class _MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        if hasattr(ctypes, "windll"):
+            stat = _MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                free_gb = stat.ullAvailPhys / (1024**3)
+    except Exception:
+        pass
+
+    likely_oom = (
+        is_access_violation
+        and free_gb is not None
+        and file_gb is not None
+        and free_gb < (file_gb + 0.4)
+    )
+    plenty_of_ram = (
+        is_access_violation
+        and free_gb is not None
+        and file_gb is not None
+        and free_gb > (file_gb + 0.8)
+    )
+
+    if is_access_violation:
+        extras.append(
+            "RESTART the chat application before retrying — after a native "
+            "access-violation crash, the C++ heap is corrupted and any further "
+            "Llama(...) call in the same process tends to crash in the same place. "
+            "This is the single most common cause of 'second test also failed'."
+        )
+
+    if likely_oom:
+        extras.append(
+            f"Out of memory may also apply: free RAM {free_gb:.2f} GB vs model "
+            f"file {file_gb:.2f} GB. Lower n_ctx/n_batch/max_tokens or pick a "
+            "smaller GGUF (e.g. Qwen2.5-0.5B-Instruct ~470 MB)."
+        )
+    elif plenty_of_ram:
+        extras.append(
+            f"OOM is unlikely here: free RAM {free_gb:.2f} GB vs model file "
+            f"{file_gb:.2f} GB. The crash is almost certainly leftover state "
+            "from a previous load attempt — restart the application."
+        )
+
     if "gemma-3" in name or "gemma3" in name:
         extras.append(
             "Gemma 3 GGUFs require a very recent llama.cpp runtime. "
-            "Upgrade with:  pip install --upgrade --prefer-binary llama-cpp-python"
+            "Upgrade with:  pip install --upgrade --prefer-binary llama-cpp-python "
+            "or try a Gemma 2 / Llama-3 / Phi-3 / Qwen2.5 GGUF instead."
         )
+    elif is_access_violation and not (likely_oom or plenty_of_ram):
         extras.append(
-            "If the upgrade still crashes, try a Gemma 2 build instead "
-            "(e.g. gemma-2-2b-it-Q4_K_M.gguf), or a Llama-3 / Phi-3 / Qwen2.5 GGUF — "
-            "those work with older runtimes."
+            "If restarting does not help, the GGUF may need a newer llama.cpp "
+            "than the installed wheel. Try:  pip install --upgrade --prefer-binary "
+            "llama-cpp-python  or pick a different GGUF."
         )
-    elif is_access_violation:
-        extras.append(
-            "Access-violation crashes from the loader almost always mean the GGUF "
-            "needs a newer llama.cpp than the installed wheel. "
-            "Try:  pip install --upgrade --prefer-binary llama-cpp-python"
-        )
-        extras.append("Or pick a slightly older GGUF (e.g. Q4_K_M of Llama-3, Phi-3, Qwen2.5).")
-    else:
+    elif not is_access_violation:
         extras.append(
             "If this looks like a tokenizer or architecture error, upgrade "
             "llama-cpp-python or pick a different GGUF."
@@ -502,10 +710,119 @@ def _ping_messages() -> List[Dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": "You are a connectivity check. Reply with exactly the single word OK and nothing else.",
+            "content": (
+                "You are a connectivity check. Reply with exactly the two ASCII letters OK "
+                "and nothing else: no punctuation, no markdown, no line breaks, no emoji."
+            ),
         },
         {"role": "user", "content": "Ping."},
     ]
+
+
+def _safe_ascii_preview(s: str, limit: int = 160) -> str:
+    """Plain-text preview safe for Windows QMessageBox / Tk dialogs (ASCII-only)."""
+    t = (s or "").replace("\r\n", "\n").strip()
+    if len(t) > limit:
+        t = t[: limit - 3] + "..."
+    out: List[str] = []
+    for ch in t:
+        o = ord(ch)
+        if o < 32 and ch not in "\n\t":
+            out.append("?")
+        elif o <= 127:
+            out.append(ch)
+        else:
+            out.append("?")
+    return "".join(out)
+
+
+def _is_running_under_debugger() -> bool:
+    """Heuristic: are we running under debugpy / VS Code / Cursor debugger?
+
+    Native llama.cpp loaders frequently produce NULL-deref access violations
+    when ``sys.settrace`` is hooked by debugpy in worker threads, so we use
+    this to (a) warn users and (b) force subprocess isolation in tests.
+    """
+    if "debugpy" in sys.modules:
+        return True
+    for name in ("pydevd", "pydevd_pycharm"):
+        if name in sys.modules:
+            return True
+    if sys.gettrace() is not None:
+        return True
+    if os.environ.get("DEBUGPY_LAUNCHER_PORT") or os.environ.get("PYDEVD_USE_FRAME_EVAL"):
+        return True
+    return False
+
+
+def _local_gguf_test_via_subprocess(settings: Dict[str, Any], wall_timeout: float) -> str:
+    """Run the load + ping in an isolated child process.
+
+    Returns the assistant text on success; raises ``RuntimeError`` with the
+    child's stderr / parsed error on failure. A native crash in the child
+    (segfault, access violation) cannot affect the calling GUI process.
+    """
+    import subprocess
+
+    payload = json.dumps(settings)
+    cmd = [sys.executable, "-m", "testbench._local_gguf_worker", payload]
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ)
+    py_path = env.get("PYTHONPATH", "")
+    if repo_root not in py_path.split(os.pathsep):
+        env["PYTHONPATH"] = (repo_root + os.pathsep + py_path) if py_path else repo_root
+
+    creation_flags = 0
+    if os.name == "nt":
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=wall_timeout,
+            env=env,
+            creationflags=creation_flags,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"Local GGUF test (isolated worker) timed out after {int(wall_timeout)} s. "
+            "Increase Request timeout (try 300 s) or pick a smaller GGUF."
+        ) from e
+
+    parsed: Optional[Dict[str, Any]] = None
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("RESULT:"):
+            try:
+                parsed = json.loads(line[len("RESULT:"):])
+            except json.JSONDecodeError:
+                parsed = None
+
+    if parsed is None:
+        details = (proc.stderr or "").strip().splitlines()[-12:]
+        raise RuntimeError(
+            "Local GGUF worker did not return a result.\n"
+            f"  - Exit code: {proc.returncode}\n"
+            "  - Last child output:\n    "
+            + "\n    ".join(details or ["(no output)"])
+        )
+
+    if not parsed.get("ok"):
+        err = str(parsed.get("error") or "unknown error")
+        stage = parsed.get("stage") or "?"
+        details = (proc.stderr or "").strip().splitlines()[-12:]
+        msg = (
+            f"Local GGUF worker failed at stage {stage!r}: {err}\n"
+            "  - The crash happened in an isolated child process; the GUI is unaffected.\n"
+            "  - Last child output:\n    "
+            + "\n    ".join(details or ["(no output)"])
+        )
+        raise RuntimeError(msg)
+
+    return str(parsed.get("response") or "")
 
 
 def llm_connection_test(
@@ -519,7 +836,8 @@ def llm_connection_test(
     Minimal chat completion to verify endpoint, credentials, and deployment/model name.
 
     ``provider`` is one of ``azure_openai``, ``openai``, or ``local_gguf`` (aliases accepted).
-    ``timeout_seconds`` is clamped 5–600 for cloud providers and ignored for local GGUF.
+    ``timeout_seconds`` is clamped 5–600. For **Local GGUF**, it is also the maximum wall-clock
+    wait for model load plus one ping (minimum 90 s so short values do not abort mid-load).
     """
     t = max(5.0, min(600.0, float(timeout_seconds)))
     cfg = {
@@ -531,17 +849,32 @@ def llm_connection_test(
 
     prov_norm = _PROVIDER_ALIASES.get(str(provider).lower(), str(provider).lower())
     if prov_norm == PROVIDER_LOCAL_GGUF:
+        wall_timeout = max(90.0, min(600.0, t))
         settings = _local_gguf_settings(cfg)
+        debugger_note = ""
+        if _is_running_under_debugger():
+            debugger_note = (
+                "\nNOTE: a Python debugger (debugpy / VS Code / Cursor) is attached. "
+                "The connection test was run in an isolated child process to avoid the "
+                "native access-violation crashes that can happen when llama.cpp's worker "
+                "threads race with the debugger's sys.settrace hook. For best results, "
+                "launch gui_chat.py with python.exe directly (not via the debugger) when "
+                "using a local GGUF model.\n"
+            )
+
         try:
-            text = _local_gguf_chat(_ping_messages(), cfg, temperature=0.0, max_tokens=16)
+            text = _local_gguf_test_via_subprocess(settings, wall_timeout)
         except RuntimeError:
             raise
+        preview = _safe_ascii_preview(text)
         return (
-            f"Local GGUF check passed.\n\n"
+            f"Local GGUF check passed (isolated child process).\n\n"
             f"Model: {settings.get('model_path')}\n"
             f"Chat format: {settings.get('chat_format')}\n"
             f"n_ctx: {settings.get('n_ctx')} | n_gpu_layers: {settings.get('n_gpu_layers')}\n"
-            f"Response: {text!r}"
+            f"Wall timeout used: {int(wall_timeout)} s (from Request timeout; minimum 90 s for local)\n"
+            f"Response (ASCII preview): {preview!r}"
+            f"{debugger_note}"
         )
 
     try:

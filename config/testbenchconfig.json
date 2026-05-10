@@ -152,8 +152,9 @@
     "api_key": "DbkRYPFQON3G8rcUs3MaoJz17lgBsWFYTxw7bI7dHHO2J9vRmb9eJQQJ99CEACHYHv6XJ3w3AAAAACOGSDHd"
   },
   "llm": {
-    "provider": "azure_openai",
-    "timeout_seconds": 5,
+    "provider": "local_gguf",
+    "timeout_seconds": 240,
+    "auto_analyze_results": true,
     "chat_mode": "plan"
   },
   "openai_api": {
@@ -162,19 +163,28 @@
     "base_url": ""
   },
   "local_gguf": {
-    "model_path": "",
-    "n_ctx": 4096,
-    "n_threads": 0,
+    "model_path": "C:/git/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "chat_format": "qwen",
+    "n_ctx": 2048,
     "n_gpu_layers": 0,
-    "n_batch": 256,
-    "max_tokens": 1024,
-    "chat_format": "auto",
+    "n_threads": 0,
+    "n_batch": 128,
+    "max_tokens": 512,
     "verbose": false
   },
   "rag": {
     "enabled": true,
     "dir": "rag_docs",
-    "extensions": [".txt", ".md", ".markdown", ".rst", ".json", ".csv", ".log", ".py"],
+    "extensions": [
+      ".txt",
+      ".md",
+      ".markdown",
+      ".rst",
+      ".json",
+      ".csv",
+      ".log",
+      ".py"
+    ],
     "top_k": 4,
     "chunk_chars": 800,
     "chunk_overlap": 120,

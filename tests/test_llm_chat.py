@@ -12,7 +12,11 @@ from testbench.llm_chat import (
     PROVIDER_OPENAI,
     _local_gguf_settings,
     _normalize_azure_endpoint,
+    _normalize_llm_json_text,
+    _parse_plan_response,
     _resolve_provider,
+    _safe_ascii_preview,
+    _salvage_command_lines,
 )
 
 
@@ -94,3 +98,69 @@ def test_local_gguf_settings_clamps_out_of_range():
     assert s["n_gpu_layers"] == 200
     assert s["n_threads"] == 128
     assert s["max_tokens"] == 16
+
+
+def test_safe_ascii_preview_strips_non_ascii():
+    assert _safe_ascii_preview("OK") == "OK"
+    assert _safe_ascii_preview("OK 👋") == "OK ?"
+
+
+def test_normalize_llm_json_text_strips_arbitrary_fence_tags():
+    """Small local models often use ``tool_code`` / ``python`` instead of ``json``."""
+    payload = '{"commands": ["bc.osc.run"], "analysis": ""}'
+    for tag in ("", "json", "tool_code", "python", "bash"):
+        wrapped = f"```{tag}\n{payload}\n```"
+        assert _normalize_llm_json_text(wrapped) == payload
+
+
+def test_salvage_command_lines_recovers_fenced_commands():
+    """Gemma 2 sometimes returns a tool_code fence with a bare command line."""
+    raw = "```tool_code\nosc.get_trace 1 1024\n```"
+    cmds = _salvage_command_lines(raw)
+    assert cmds == ["osc.get_trace 1 1024"]
+
+
+def test_salvage_command_lines_handles_multi_line_block():
+    raw = (
+        "```python\n"
+        "bc.osc.connect\n"
+        "bc.osc.set_channel 1 enable\n"
+        "bc.osc.measure 1\n"
+        "```"
+    )
+    assert _salvage_command_lines(raw) == [
+        "bc.osc.connect",
+        "bc.osc.set_channel 1 enable",
+        "bc.osc.measure 1",
+    ]
+
+
+def test_salvage_command_lines_rejects_prose():
+    """Free-text answers must not be misinterpreted as commands."""
+    assert _salvage_command_lines("I will read channel 1 of the oscilloscope.") == []
+    assert _salvage_command_lines("```\nThis is an explanation.\n```") == []
+
+
+def test_parse_plan_response_falls_back_to_salvaged_commands():
+    """When the model emits a fenced command list, _parse_plan_response should recover it."""
+    cmds, hint = _parse_plan_response("```tool_code\nosc.get_trace 1 1024\n```")
+    assert cmds == ["osc.get_trace 1 1024"]
+    assert "recovered" in hint.lower()
+
+
+def test_local_gguf_settings_zero_means_auto_default():
+    """0 in the GUI spinboxes means 'auto/default', not literally one thread."""
+    defaults = _local_gguf_settings({})
+    s = _local_gguf_settings({
+        "local_gguf": {
+            "n_threads": 0,
+            "n_ctx": 0,
+            "n_batch": 0,
+            "max_tokens": 0,
+        }
+    })
+    assert s["n_threads"] == defaults["n_threads"]
+    assert s["n_ctx"] == defaults["n_ctx"]
+    assert s["max_tokens"] == defaults["max_tokens"]
+    assert s["n_threads"] >= 1
+    assert s["n_gpu_layers"] == 0

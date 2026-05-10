@@ -1259,6 +1259,16 @@ try:
             timeout_var = tk.StringVar(value=str(_timeout_value()))
             tk.Spinbox(rto, from_=5, to=600, textvariable=timeout_var, width=8).pack(side='left')
             tk.Label(rto, text='seconds', anchor='w').pack(side='left', padx=(6, 0))
+            tk.Label(
+                top,
+                text=(
+                    'Cloud: timeout per request. Local GGUF: same value caps load+test time (min 90 s); '
+                    'first load is often 30–120 s — use 180–300 s if the test times out.'
+                ),
+                anchor='w',
+                justify='left',
+                wraplength=560,
+            ).pack(fill='x', padx=10, pady=(0, 4))
 
             aa_row = tk.Frame(top)
             aa_row.pack(fill='x', padx=10, pady=4)
@@ -1488,11 +1498,42 @@ try:
 
                 test_b.configure(state='disabled', text='Testing…')
 
+                _watch = {'cancel': None, 'armed': True}
+
+                def _watchdog() -> None:
+                    if not _watch['armed']:
+                        return
+                    if str(test_b.cget('text')) == 'Testing…':
+                        test_b.configure(state='normal', text='Test connection')
+                        messagebox.showwarning(
+                            'LLM test failed',
+                            'The connection test did not finish within 5 minutes.\n\n'
+                            'For Local GGUF: check the .gguf path, try a smaller model, '
+                            'or increase timeout (e.g. 180–300 s).',
+                            parent=top,
+                        )
+
+                _watch['cancel'] = self.root.after(300_000, _watchdog)
+
                 def _finish_ok(m: str) -> None:
+                    _watch['armed'] = False
+                    c = _watch['cancel']
+                    if c is not None:
+                        try:
+                            self.root.after_cancel(c)
+                        except Exception:
+                            pass
                     test_b.configure(state='normal', text='Test connection')
                     messagebox.showinfo('LLM test', m, parent=top)
 
                 def _finish_err(err: str) -> None:
+                    _watch['armed'] = False
+                    c = _watch['cancel']
+                    if c is not None:
+                        try:
+                            self.root.after_cancel(c)
+                        except Exception:
+                            pass
                     test_b.configure(state='normal', text='Test connection')
                     messagebox.showwarning('LLM test failed', err, parent=top)
 
@@ -1517,8 +1558,9 @@ try:
                             local_gguf_dict,
                         )
                         self.root.after(0, lambda m=msg: _finish_ok(m))
-                    except Exception as e:
-                        self.root.after(0, lambda err=str(e): _finish_err(err))
+                    except BaseException as e:
+                        err = str(e).strip() or type(e).__name__
+                        self.root.after(0, lambda err=err: _finish_err(err))
 
                 threading.Thread(target=_bg, daemon=True).start()
 
