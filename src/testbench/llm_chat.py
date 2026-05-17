@@ -1,9 +1,12 @@
 """LLM-backed natural language → TestBench command plans (multi-provider)."""
 
+import atexit
 import json
 import os
 import re
 import sys
+import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from testbench.llm_automation_loop import (
@@ -28,10 +31,12 @@ PROVIDER_LOCAL_GGUF = "local_gguf"
 _LOCAL_GGUF_LOCK: Any = None
 _LOCAL_GGUF_CACHE: Dict[str, Any] = {}
 
-# Set to True after the first native llama.cpp load failure in this process.
-# Once that happens the C++ heap is unreliable and every subsequent Llama(...)
-# tends to crash in the same place — the only fix is restarting the process.
+# Set to True after the first native in-process llama.cpp load failure.
 _LOCAL_GGUF_PRIOR_CRASH: bool = False
+
+# Persistent isolated worker (load once per settings key). Chat uses this by
+# default so native crashes never corrupt the GUI process.
+_LOCAL_GGUF_SUBPROCESS_CLIENT: Any = None
 
 
 def _env(name: str) -> str:
@@ -217,7 +222,7 @@ def _parse_plan_response(content: str, cfg: Optional[Dict[str, Any]] = None) -> 
     if not normalized:
         raise RuntimeError("Model returned empty response after stripping markdown.")
     try:
-        payload: Dict[str, Any] = json.loads(normalized)
+        payload = json.loads(normalized)
     except json.JSONDecodeError as e:
         salvaged = _salvage_command_lines(raw)
         if salvaged:
@@ -228,6 +233,20 @@ def _parse_plan_response(content: str, cfg: Optional[Dict[str, Any]] = None) -> 
             "Model did not return valid JSON. Update the prompt or reduce temperature.\n"
             f"Raw content:\n{raw}"
         ) from e
+
+    if isinstance(payload, list):
+        cmds = [str(c).strip() for c in payload if str(c).strip()]
+        if cmds:
+            return cmds, "(recovered command list from JSON array response)"
+        raise RuntimeError(
+            "Model returned a JSON array with no commands.\n"
+            f"Raw content:\n{raw}"
+        )
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"Model returned unexpected JSON type {type(payload).__name__}.\n"
+            f"Raw content:\n{raw}"
+        )
 
     plan = structured_plan_from_payload(payload)
     return finalize_plan(plan, include_checks=_plan_include_checks(cfg))
@@ -539,7 +558,9 @@ def _load_local_gguf_model(settings: Dict[str, Any]) -> Any:
                 verbose=bool(settings.get("verbose", False)),
             )
         except Exception as e:
-            _LOCAL_GGUF_PRIOR_CRASH = True
+            msg = str(e) or type(e).__name__
+            if "access violation" in msg.lower() or "0x0000000000000000" in msg:
+                _LOCAL_GGUF_PRIOR_CRASH = True
             raise RuntimeError(_format_local_gguf_load_error(model_path, e)) from e
         _LOCAL_GGUF_CACHE[key] = model
         return model
@@ -734,6 +755,262 @@ def _format_local_gguf_load_error(model_path: str, exc: BaseException) -> str:
     )
 
 
+def _ensure_local_gguf_n_ctx(
+    settings: Dict[str, Any],
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+) -> Dict[str, Any]:
+    """Raise ``n_ctx`` when the prompt clearly exceeds the configured window."""
+    est_prompt = sum(len(str(m.get("content") or "")) for m in messages) // 4 + 64
+    need = est_prompt + int(max_tokens) + 128
+    have = int(settings.get("n_ctx", 4096) or 4096)
+    if need <= have:
+        return settings
+    bumped = dict(settings)
+    bumped["n_ctx"] = min(131072, max(have, need, 4096))
+    return bumped
+
+
+def _use_local_gguf_subprocess() -> bool:
+    """True unless TESTBENCH_LOCAL_GGUF_INPROCESS=1 forces in-process load."""
+    v = os.environ.get("TESTBENCH_LOCAL_GGUF_INPROCESS", "").strip().lower()
+    return v not in {"1", "true", "yes", "on"}
+
+
+def _local_gguf_worker_env() -> Dict[str, str]:
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ)
+    py_path = env.get("PYTHONPATH", "")
+    if repo_root not in py_path.split(os.pathsep):
+        env["PYTHONPATH"] = (repo_root + os.pathsep + py_path) if py_path else repo_root
+    return env
+
+
+def _parse_local_gguf_worker_stdout(stdout: str, stderr: str, returncode: int) -> str:
+    parsed: Optional[Dict[str, Any]] = None
+    for line in (stdout or "").splitlines():
+        if line.startswith("RESULT:"):
+            try:
+                parsed = json.loads(line[len("RESULT:") :])
+            except json.JSONDecodeError:
+                parsed = None
+    if parsed is None:
+        details = (stderr or "").strip().splitlines()[-12:]
+        raise RuntimeError(
+            "Local GGUF worker did not return a result.\n"
+            f"  - Exit code: {returncode}\n"
+            "  - Last child output:\n    "
+            + "\n    ".join(details or ["(no output)"])
+        )
+    if not parsed.get("ok"):
+        err = str(parsed.get("error") or "unknown error")
+        stage = parsed.get("stage") or "?"
+        details = (stderr or "").strip().splitlines()[-12:]
+        raise RuntimeError(
+            f"Local GGUF worker failed at stage {stage!r}: {err}\n"
+            "  - Native work ran in an isolated child process; the GUI is unaffected.\n"
+            "  - Last child output:\n    "
+            + "\n    ".join(details or ["(no output)"])
+        )
+    return str(parsed.get("response") or "")
+
+
+class _LocalGgufSubprocessClient:
+    """Keeps one ``--serve`` worker alive per resolved settings key."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._proc: Any = None
+        self._active_key: Optional[str] = None
+
+    def _make_settings_key(self, settings: Dict[str, Any]) -> str:
+        return "|".join(
+            str(x)
+            for x in (
+                os.path.abspath(str(settings.get("model_path") or "")),
+                int(settings.get("n_ctx", 0)),
+                int(settings.get("n_threads", 0)),
+                int(settings.get("n_gpu_layers", 0)),
+                int(settings.get("n_batch", 0)),
+                str(settings.get("chat_format") or ""),
+            )
+        )
+
+    def _stop_unlocked(self) -> None:
+        proc = self._proc
+        self._proc = None
+        self._active_key = None
+        if proc is None:
+            return
+        try:
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.write(json.dumps({"op": "shutdown"}) + "\n")
+                proc.stdin.flush()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _start_unlocked(self, settings: Dict[str, Any]) -> None:
+        import subprocess
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "testbench._local_gguf_worker",
+            "--serve",
+            json.dumps(settings),
+        ]
+        creation_flags = 0
+        if os.name == "nt":
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=_local_gguf_worker_env(),
+            creationflags=creation_flags,
+        )
+        self._active_key = self._make_settings_key(settings)
+        deadline = time.monotonic() + 600.0
+        while time.monotonic() < deadline:
+            if self._proc.poll() is not None:
+                err = (self._proc.stderr.read() if self._proc.stderr else "") or ""
+                raise RuntimeError(
+                    "Local GGUF worker exited during startup.\n"
+                    + "\n".join(f"  - {ln}" for ln in err.strip().splitlines()[-8:] or ["(no stderr)"])
+                )
+            line = self._proc.stdout.readline() if self._proc.stdout else ""
+            if line.startswith("RESULT:"):
+                try:
+                    payload = json.loads(line[len("RESULT:") :])
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("ok") and payload.get("ready"):
+                    return
+                if not payload.get("ok"):
+                    raise RuntimeError(
+                        f"Local GGUF worker failed to start: {payload.get('error') or payload}"
+                    )
+        raise RuntimeError("Local GGUF worker startup timed out (600 s).")
+
+    def run_job(self, settings: Dict[str, Any], job: Dict[str, Any], wall_timeout: float) -> str:
+        with self._lock:
+            key = self._make_settings_key(settings)
+            if self._proc is None or self._proc.poll() is not None or key != self._active_key:
+                self._stop_unlocked()
+                self._start_unlocked(settings)
+            assert self._proc is not None and self._proc.stdin is not None
+            try:
+                self._proc.stdin.write(json.dumps(job) + "\n")
+                self._proc.stdin.flush()
+            except Exception as e:
+                self._stop_unlocked()
+                raise RuntimeError(f"Failed to send job to local GGUF worker: {e}") from e
+
+            deadline = time.monotonic() + max(5.0, float(wall_timeout))
+            while time.monotonic() < deadline:
+                if self._proc.poll() is not None:
+                    err = (self._proc.stderr.read() if self._proc.stderr else "") or ""
+                    self._stop_unlocked()
+                    raise RuntimeError(
+                        "Local GGUF worker crashed during inference.\n"
+                        "Restart the chat app and retry. If this persists, upgrade "
+                        "llama-cpp-python or use a different GGUF.\n"
+                        + "\n".join(
+                            f"  - {ln}" for ln in err.strip().splitlines()[-8:] or ["(no stderr)"]
+                        )
+                    )
+                line = self._proc.stdout.readline() if self._proc.stdout else ""
+                if not line:
+                    continue
+                if line.startswith("RESULT:"):
+                    try:
+                        payload = json.loads(line[len("RESULT:") :])
+                    except json.JSONDecodeError:
+                        continue
+                    if not payload.get("ok"):
+                        err = str(payload.get("error") or "unknown error")
+                        stage = payload.get("stage") or "?"
+                        raise RuntimeError(
+                            f"Local GGUF worker failed at stage {stage!r}: {err}"
+                        )
+                    return str(payload.get("response") or "")
+            self._stop_unlocked()
+            raise RuntimeError(
+                f"Local GGUF inference timed out after {int(wall_timeout)} s. "
+                "Increase Request timeout in LLM settings or use a smaller model."
+            )
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._stop_unlocked()
+
+
+def _local_gguf_subprocess_client() -> _LocalGgufSubprocessClient:
+    global _LOCAL_GGUF_SUBPROCESS_CLIENT
+    if _LOCAL_GGUF_SUBPROCESS_CLIENT is None:
+        _LOCAL_GGUF_SUBPROCESS_CLIENT = _LocalGgufSubprocessClient()
+        atexit.register(_LOCAL_GGUF_SUBPROCESS_CLIENT.shutdown)
+    return _LOCAL_GGUF_SUBPROCESS_CLIENT
+
+
+def _local_gguf_run_oneshot(
+    settings: Dict[str, Any], job: Dict[str, Any], wall_timeout: float
+) -> str:
+    import subprocess
+
+    payload = json.dumps({"settings": settings, "job": job})
+    cmd = [sys.executable, "-m", "testbench._local_gguf_worker", payload]
+    creation_flags = 0
+    if os.name == "nt":
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.run(
+            cmd,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=wall_timeout,
+            env=_local_gguf_worker_env(),
+            creationflags=creation_flags,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"Local GGUF worker timed out after {int(wall_timeout)} s. "
+            "Increase Request timeout (try 300 s) or pick a smaller GGUF."
+        ) from e
+    return _parse_local_gguf_worker_stdout(proc.stdout or "", proc.stderr or "", proc.returncode)
+
+
+def _local_gguf_chat_via_subprocess(
+    messages: List[Dict[str, str]],
+    settings: Dict[str, Any],
+    cfg: Dict[str, Any],
+    *,
+    temperature: float = 0.2,
+    max_tokens: int,
+) -> str:
+    llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    aoai = cfg.get("azure_openai") if isinstance(cfg.get("azure_openai"), dict) else {}
+    oa = cfg.get("openai_api") if isinstance(cfg.get("openai_api"), dict) else {}
+    wall_timeout = max(90.0, _parse_timeout_seconds(llm or {}, aoai or {}, oa or {}))
+    job = {
+        "op": "chat",
+        "messages": messages,
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+    }
+    return _local_gguf_subprocess_client().run_job(settings, job, wall_timeout)
+
+
 def _local_gguf_chat(
     messages: List[Dict[str, str]],
     cfg: Dict[str, Any],
@@ -741,10 +1018,15 @@ def _local_gguf_chat(
     temperature: float = 0.2,
     max_tokens: Optional[int] = None,
 ) -> str:
-    """Chat-completion shim around ``llama_cpp.Llama.create_chat_completion``."""
+    """Chat-completion via isolated subprocess (default) or in-process fallback."""
     settings = _local_gguf_settings(cfg)
-    model = _load_local_gguf_model(settings)
     mt = int(max_tokens if max_tokens is not None else settings.get("max_tokens", 1024))
+    settings = _ensure_local_gguf_n_ctx(settings, messages, mt)
+    if _use_local_gguf_subprocess():
+        return _local_gguf_chat_via_subprocess(
+            messages, settings, cfg, temperature=temperature, max_tokens=mt
+        )
+    model = _load_local_gguf_model(settings)
     try:
         resp = model.create_chat_completion(
             messages=messages,
@@ -834,73 +1116,8 @@ def _is_running_under_debugger() -> bool:
 
 
 def _local_gguf_test_via_subprocess(settings: Dict[str, Any], wall_timeout: float) -> str:
-    """Run the load + ping in an isolated child process.
-
-    Returns the assistant text on success; raises ``RuntimeError`` with the
-    child's stderr / parsed error on failure. A native crash in the child
-    (segfault, access violation) cannot affect the calling GUI process.
-    """
-    import subprocess
-
-    payload = json.dumps(settings)
-    cmd = [sys.executable, "-m", "testbench._local_gguf_worker", payload]
-
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env = dict(os.environ)
-    py_path = env.get("PYTHONPATH", "")
-    if repo_root not in py_path.split(os.pathsep):
-        env["PYTHONPATH"] = (repo_root + os.pathsep + py_path) if py_path else repo_root
-
-    creation_flags = 0
-    if os.name == "nt":
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            input="",
-            capture_output=True,
-            text=True,
-            timeout=wall_timeout,
-            env=env,
-            creationflags=creation_flags,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"Local GGUF test (isolated worker) timed out after {int(wall_timeout)} s. "
-            "Increase Request timeout (try 300 s) or pick a smaller GGUF."
-        ) from e
-
-    parsed: Optional[Dict[str, Any]] = None
-    for line in (proc.stdout or "").splitlines():
-        if line.startswith("RESULT:"):
-            try:
-                parsed = json.loads(line[len("RESULT:"):])
-            except json.JSONDecodeError:
-                parsed = None
-
-    if parsed is None:
-        details = (proc.stderr or "").strip().splitlines()[-12:]
-        raise RuntimeError(
-            "Local GGUF worker did not return a result.\n"
-            f"  - Exit code: {proc.returncode}\n"
-            "  - Last child output:\n    "
-            + "\n    ".join(details or ["(no output)"])
-        )
-
-    if not parsed.get("ok"):
-        err = str(parsed.get("error") or "unknown error")
-        stage = parsed.get("stage") or "?"
-        details = (proc.stderr or "").strip().splitlines()[-12:]
-        msg = (
-            f"Local GGUF worker failed at stage {stage!r}: {err}\n"
-            "  - The crash happened in an isolated child process; the GUI is unaffected.\n"
-            "  - Last child output:\n    "
-            + "\n    ".join(details or ["(no output)"])
-        )
-        raise RuntimeError(msg)
-
-    return str(parsed.get("response") or "")
+    """Run load + ping in an isolated one-shot child process."""
+    return _local_gguf_run_oneshot(settings, {"op": "ping"}, wall_timeout)
 
 
 def llm_connection_test(

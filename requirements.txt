@@ -1,26 +1,50 @@
-# Runtime — Lab Automation Chat (gui_chat.py) and bench
+# testBench — Python dependencies
+#
+# Quick install (GUI + bench + LLM + plots + tests):
+#   python -m venv .venv
+#   .venv\Scripts\activate          # Windows
+#   pip install -U pip
+#   pip install -r requirements.txt
+#
+# Real instruments (VISA / serial), optional:
+#   pip install -r requirements-hardware.txt
+#
+# Semantic RAG (config rag.backend = "embeddings"), optional:
+#   pip install sentence-transformers>=3.0.0
+#
+# Python 3.10+ recommended (3.11 or 3.12 tested).
+
+# --- GUI (gui_chat.py) ---
+# PyQt5 is the primary UI; if unavailable, the app falls back to tkinter (stdlib).
 PyQt5>=5.15.0
-matplotlib>=3.7.0
+# Pillow: plot thumbnails in the Tk backend (ImageTk)
 Pillow>=10.0.0
+
+# --- Plotting & numeric (chat_plotting, instruments) ---
+matplotlib>=3.7.0
 numpy>=1.24.0
 
-# Natural-language → bench commands (Azure OpenAI or direct OpenAI API); same venv as the GUI
+# --- LLM: Azure OpenAI & OpenAI direct API ---
+# Pulls httpx, pydantic, typing-extensions, etc. transitively.
 openai>=1.40.0
 
-# Local GGUF models (e.g. Google Gemma) via llama.cpp.
-# CPU prebuilt wheels work on Windows / macOS / Linux for Python 3.9–3.13.
-# For GPU acceleration install with the matching wheel index, e.g.:
-#   CUDA 12.1 (Windows / Linux):
-#     pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
-#   Metal (macOS):
-#     pip install llama-cpp-python  # universal2 wheel uses Metal automatically
-# Then point Settings → LLM settings → Local GGUF at a .gguf file.
+# --- LLM: local GGUF models (Settings → Local GGUF / llama.cpp) ---
+# CPU wheels: pip install llama-cpp-python
+# GPU (examples — pick one index matching your CUDA version):
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# Pulls diskcache, jinja2, numpy transitively.
 llama-cpp-python>=0.3.0
 
-# Optional: semantic RAG (set rag.backend to "embeddings" in testbenchconfig.json)
+# --- Optional: embedding-based RAG (rag.backend = "embeddings" in testbenchconfig.json) ---
+# Default RAG backend is TF-IDF (no extra packages). Uncomment to install semantic search:
 # sentence-transformers>=3.0.0
 
-# Development
+# --- System & network discovery ---
+psutil>=5.9.0
+zeroconf>=0.131.0
+
+# --- Development & CI ---
 pytest>=7.0.0
 pytest-cov>=4.0.0
 black>=23.0.0

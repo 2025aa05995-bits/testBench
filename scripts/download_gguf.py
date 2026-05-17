@@ -106,3 +106,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# python scripts/download_gguf.py ^
+#   "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf" ^
+#   "C:\git\models\Qwen2.5-7B-Instruct-Q4_K_M.gguf"

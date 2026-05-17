@@ -162,16 +162,16 @@
     "api_key": "DbkRYPFQON3G8rcUs3MaoJz17lgBsWFYTxw7bI7dHHO2J9vRmb9eJQQJ99CEACHYHv6XJ3w3AAAAACOGSDHd"
   },
   "llm": {
-    "provider": "azure_openai",
+    "provider": "local_gguf",
     "timeout_seconds": 240,
     "auto_analyze_results": true,
     "chat_mode": "plan",
     "automation_loop": {
       "enabled": true,
-      "max_iterations": 3,
+      "max_iterations": 2,
       "auto_repair_on_fail": true,
       "closed_loop_agent": true,
-      "multi_turn_history": 8
+      "multi_turn_history": 5
     }
   },
   "openai_api": {
@@ -182,7 +182,7 @@
   "local_gguf": {
     "model_path": "C:/git/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
     "chat_format": "qwen",
-    "n_ctx": 2048,
+    "n_ctx": 4096,
     "n_gpu_layers": 0,
     "n_threads": 0,
     "max_tokens": 512,

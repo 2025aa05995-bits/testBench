@@ -10,6 +10,7 @@ from testbench.llm_chat import (
     PROVIDER_AZURE,
     PROVIDER_LOCAL_GGUF,
     PROVIDER_OPENAI,
+    _ensure_local_gguf_n_ctx,
     _local_gguf_settings,
     _normalize_azure_endpoint,
     _normalize_llm_json_text,
@@ -17,6 +18,7 @@ from testbench.llm_chat import (
     _resolve_provider,
     _safe_ascii_preview,
     _salvage_command_lines,
+    _use_local_gguf_subprocess,
 )
 
 
@@ -164,3 +166,19 @@ def test_local_gguf_settings_zero_means_auto_default():
     assert s["max_tokens"] == defaults["max_tokens"]
     assert s["n_threads"] >= 1
     assert s["n_gpu_layers"] == 0
+
+
+def test_ensure_local_gguf_n_ctx_bumps_when_prompt_too_large():
+    settings = {"n_ctx": 2048, "model_path": "/x/m.gguf"}
+    messages = [{"role": "user", "content": "x" * 12000}]
+    out = _ensure_local_gguf_n_ctx(settings, messages, max_tokens=512)
+    assert out["n_ctx"] > 2048
+
+
+def test_use_local_gguf_subprocess_default_on():
+    assert _use_local_gguf_subprocess() is True
+
+
+def test_use_local_gguf_subprocess_inprocess_env(monkeypatch):
+    monkeypatch.setenv("TESTBENCH_LOCAL_GGUF_INPROCESS", "1")
+    assert _use_local_gguf_subprocess() is False
