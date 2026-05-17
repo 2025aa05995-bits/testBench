@@ -30,7 +30,9 @@ import json
 import os
 import sys
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
+
+from testbench.local_gguf_models import build_llama_kwargs, gemma3_runtime_warning, is_gemma3_model_path
 
 
 _PING_MESSAGES = [
@@ -59,16 +61,12 @@ def _load_model(settings: Dict[str, Any]) -> Any:
         raise ValueError("settings.model_path is empty")
     if not os.path.isfile(model_path):
         raise FileNotFoundError(f"GGUF model file not found: {model_path}")
+    if is_gemma3_model_path(model_path):
+        warn = gemma3_runtime_warning()
+        if warn:
+            raise RuntimeError(warn)
 
-    return Llama(
-        model_path=model_path,
-        n_ctx=int(settings.get("n_ctx", 4096)),
-        n_threads=int(settings.get("n_threads", 4)),
-        n_gpu_layers=int(settings.get("n_gpu_layers", 0)),
-        n_batch=int(settings.get("n_batch", 256)),
-        chat_format=str(settings.get("chat_format") or "chatml"),
-        verbose=bool(settings.get("verbose", False)),
-    )
+    return Llama(**build_llama_kwargs(settings))
 
 
 def _run_job(model: Any, job: Dict[str, Any]) -> str:

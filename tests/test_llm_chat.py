@@ -6,12 +6,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from gui_chat_support.command_helpers import CHAT_MODE_RAG, normalize_chat_mode
 from testbench.llm_chat import (
     PROVIDER_AZURE,
     PROVIDER_LOCAL_GGUF,
     PROVIDER_OPENAI,
     _ensure_local_gguf_n_ctx,
     _local_gguf_settings,
+    _use_local_compact_prompt,
+    filter_allowed_commands_text,
     _normalize_azure_endpoint,
     _normalize_llm_json_text,
     _parse_plan_response,
@@ -64,6 +67,7 @@ def test_local_gguf_settings_defaults_and_clamps():
     assert -1 <= s["n_gpu_layers"] <= 200
     assert 1 <= s["n_threads"] <= 128
     assert 16 <= s["max_tokens"] <= 32768
+    assert 0.0 <= s["temperature"] <= 2.0
     assert s["chat_format"] in {"chatml", "gemma", "llama-3", "llama-2", "mistral-instruct", "phi-3", "qwen"}
 
 
@@ -75,6 +79,18 @@ def test_local_gguf_settings_chat_format_auto_picks_gemma():
         }
     })
     assert s["chat_format"] == "gemma"
+
+
+def test_local_gguf_settings_gemma3_resolves_to_gemma_template():
+    s = _local_gguf_settings({
+        "local_gguf": {
+            "model_path": "C:/models/gemma-3-4b-it-Q4_K_M.gguf",
+            "chat_format": "gemma-3",
+            "n_ctx": 4096,
+        }
+    })
+    assert s["chat_format"] == "gemma"
+    assert s["n_ctx"] >= 8192
 
 
 def test_local_gguf_settings_explicit_chat_format_kept():
@@ -119,7 +135,13 @@ def test_salvage_command_lines_recovers_fenced_commands():
     """Gemma 2 sometimes returns a tool_code fence with a bare command line."""
     raw = "```tool_code\nosc.get_trace 1 1024\n```"
     cmds = _salvage_command_lines(raw)
-    assert cmds == ["osc.get_trace 1 1024"]
+    assert cmds == ["bc.osc.get_trace 1 1024"]
+
+
+def test_salvage_gemma_ps_with_parens():
+    raw = "```tool_code\nps.on()\nps.off()\n```"
+    cmds = _salvage_command_lines(raw)
+    assert cmds == ["bc.ps.on", "bc.ps.off"]
 
 
 def test_salvage_command_lines_handles_multi_line_block():
@@ -146,7 +168,7 @@ def test_salvage_command_lines_rejects_prose():
 def test_parse_plan_response_falls_back_to_salvaged_commands():
     """When the model emits a fenced command list, _parse_plan_response should recover it."""
     cmds, hint = _parse_plan_response("```tool_code\nosc.get_trace 1 1024\n```")
-    assert cmds == ["osc.get_trace 1 1024"]
+    assert cmds == ["bc.osc.get_trace 1 1024"]
     assert "recovered" in hint.lower()
 
 
@@ -182,3 +204,28 @@ def test_use_local_gguf_subprocess_default_on():
 def test_use_local_gguf_subprocess_inprocess_env(monkeypatch):
     monkeypatch.setenv("TESTBENCH_LOCAL_GGUF_INPROCESS", "1")
     assert _use_local_gguf_subprocess() is False
+
+
+def test_filter_allowed_commands_text_power_supply():
+    allowed = "\n".join(
+        [
+            "ps.on — turn on",
+            "ps.off — turn off",
+            "osc.run — acquire",
+            "mm.measure_voltage — dmm",
+        ]
+    )
+    slim = filter_allowed_commands_text(allowed, "power cycle the power supply instrument")
+    assert "ps.on" in slim
+    assert "ps.off" in slim
+    assert "osc.run" not in slim
+
+
+def test_normalize_chat_mode_rag():
+    assert normalize_chat_mode("rag") == CHAT_MODE_RAG
+    assert normalize_chat_mode("RAG") == CHAT_MODE_RAG
+
+
+def test_local_compact_prompt_default_for_local_provider():
+    assert _use_local_compact_prompt({"llm": {"provider": "local_gguf"}}) is True
+    assert _use_local_compact_prompt({"llm": {"provider": "azure_openai"}}) is False

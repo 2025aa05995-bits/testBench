@@ -20,6 +20,12 @@ from testbench.llm_plan_schema import (
     plan_schema_prompt_section,
     structured_plan_from_payload,
 )
+from testbench.local_gguf_models import (
+    apply_gemma3_load_defaults,
+    gemma3_runtime_warning,
+    is_gemma3_model_path,
+    resolve_local_gguf_chat_format,
+)
 from testbench.rag import _summarize_results_for_query, retrieve_for_prompt
 
 # Config keys
@@ -140,6 +146,29 @@ def _normalize_llm_json_text(content: str) -> str:
 
 
 _COMMAND_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*(?:\s+\S.*)?$")
+_SALVAGE_LINE_RE = re.compile(
+    r"^(?:bc\.|bench\.)?[A-Za-z_][\w.]*(?:\([^)]*\))?(?:\s+[-\d.eE+]+)?$"
+)
+
+
+def _normalize_salvaged_line(raw_line: str) -> Optional[str]:
+    """Turn ``ps.off()`` / ``ps.off`` into ``bc.ps.off`` when possible."""
+    line = (raw_line or "").strip().rstrip(";")
+    if not line or line.startswith("#") or line.startswith("//"):
+        return None
+    if line.endswith(":") or line.endswith("."):
+        return None
+    line = re.sub(r"\(\s*\)", "", line)
+    low = line.lower()
+    if low.startswith(("bc.", "bench.", "delay ", "help", "plot ", "assert ", "limit ")):
+        pass
+    elif re.match(r"^[a-z_]+\.[a-z_0-9]+", line, re.IGNORECASE):
+        line = "bc." + line
+    if _COMMAND_LINE_RE.match(line):
+        return line
+    if _SALVAGE_LINE_RE.match(line):
+        return line
+    return None
 
 
 def _salvage_command_lines(content: str) -> List[str]:
@@ -158,14 +187,9 @@ def _salvage_command_lines(content: str) -> List[str]:
         s = fence.group(2).strip()
     cmds: List[str] = []
     for raw_line in s.splitlines():
-        line = raw_line.strip().rstrip(";")
-        if not line or line.startswith("#") or line.startswith("//"):
-            continue
-        if line.endswith(":") or line.endswith("."):
-            return []
-        if not _COMMAND_LINE_RE.match(line):
-            return []
-        cmds.append(line)
+        line = _normalize_salvaged_line(raw_line)
+        if line:
+            cmds.append(line)
         if len(cmds) >= 32:
             break
     return cmds
@@ -196,10 +220,100 @@ def _system_prompt() -> str:
         "- Every instrument command MUST be bc.<category>.<action> or bench.<category>.<action> "
         "(e.g. bc.osc.run). Never emit bare category.action like osc.run.\n"
         "- Keep commands minimal and safe; avoid raw SCPI unless user explicitly asks.\n"
+        "- The commands array must contain ONLY executable lines (bc.*, bench.*, delay, "
+        "assert, limit, plot, help). Do NOT put section titles like Power Cycle in "
+        'commands — use a quoted heading line "Power Cycle" if you need a label.\n'
         "- If a CONTEXT block is present, treat it as internal reference material "
         "(SOPs, datasheets, lab notes). Use it to choose parameters and order, but "
         "do NOT mention or quote it in the analysis text.\n"
     )
+
+
+def _system_prompt_local() -> str:
+    """Shorter plan prompt for small local models (Gemma 1B–4B, etc.)."""
+    return (
+        "You convert lab requests into TestBench command lines.\n"
+        "Output ONLY one JSON object. No markdown fences. No Python. No explanations outside JSON.\n"
+        'Required keys: "commands" (array of strings), "analysis" (short string).\n'
+        "\n"
+        "Example for power-cycling a power supply:\n"
+        '{"commands": ["bc.ps.off", "delay 1", "bc.ps.on"], "analysis": "Power-cycle the supply"}\n'
+        "\n"
+        "Rules:\n"
+        "- Use ONLY commands listed under ALLOWED in the user message.\n"
+        "- Format: bc.<category>.<action> [args] or bench.<category>.<action> [args].\n"
+        "- Also allowed: delay N, help, plot ..., assert ..., limit ...\n"
+        "- Never invent actions. Never output Python, shell scripts, or tutorials.\n"
+        "- commands must be executable only — not bare titles like Power Cycle "
+        '(use "Power Cycle" as a quoted heading if needed).\n'
+    )
+
+
+def _use_local_compact_prompt(cfg: Dict[str, Any]) -> bool:
+    """Trim allow-list and use strict JSON prompt for local GGUF (default on)."""
+    llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    if not isinstance(llm, dict):
+        return _resolve_provider(cfg) == PROVIDER_LOCAL_GGUF
+    v = llm.get("local_compact_prompt")
+    if v is None:
+        return _resolve_provider(cfg) == PROVIDER_LOCAL_GGUF
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() not in {"false", "0", "no", "off"}
+    return bool(v)
+
+
+_CATEGORY_HINTS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("ps", ("power supply", "power cycle", "psu", "voltage", "current", "bc.ps", "bench.ps")),
+    ("osc", ("oscilloscope", "scope", "trace", "waveform", "bc.osc")),
+    ("sg", ("signal generator", "bc.sg")),
+    ("sa", ("spectrum", "bc.sa")),
+    ("mm", ("multimeter", "dmm", "bc.mm")),
+    ("fg", ("function generator", "bc.fg")),
+    ("na", ("network analyzer", "vna", "bc.na")),
+    ("el", ("electronic load", "load", "bc.el")),
+    ("smu", ("smu", "source measure", "bc.smu")),
+    ("tc", ("chamber", "temperature", "bc.tc")),
+    ("pm", ("power meter", "bc.pm")),
+    ("san", ("signal analyzer", "bc.san")),
+    ("fc", ("frequency counter", "bc.fc")),
+    ("config", ("config", "visa", "bind", "connect", "bench.config")),
+    ("plot", ("plot",)),
+    ("arb", ("arb", "waveform csv", "bc.fg.load_arb")),
+)
+
+
+def filter_allowed_commands_text(
+    allowed: str, user_text: str, *, max_lines: int = 72
+) -> str:
+    """Return a smaller allow-list matched to keywords in the user request."""
+    lines = [ln for ln in (allowed or "").splitlines() if ln.strip()]
+    if not lines:
+        return allowed
+    ut = (user_text or "").lower()
+    categories: set[str] = set()
+    for cat, hints in _CATEGORY_HINTS:
+        if any(h in ut for h in hints):
+            categories.add(cat)
+    if not categories:
+        return "\n".join(lines[:max_lines])
+    picked: List[str] = []
+    for ln in lines:
+        head = ln.split(".", 1)[0].strip().lower()
+        if head in categories:
+            picked.append(ln)
+    if not picked:
+        return "\n".join(lines[:max_lines])
+    if len(picked) > max_lines:
+        picked = picked[:max_lines]
+    return "\n".join(picked)
+
+
+def _plan_system_prompt(cfg: Dict[str, Any]) -> str:
+    if _use_local_compact_prompt(cfg):
+        return _system_prompt_local()
+    return _system_prompt()
 
 
 def _plan_include_checks(cfg: Optional[Dict[str, Any]]) -> bool:
@@ -229,9 +343,18 @@ def _parse_plan_response(content: str, cfg: Optional[Dict[str, Any]] = None) -> 
             return salvaged, (
                 "(recovered plain command list from non-JSON model response)"
             )
+        hint = ""
+        low = raw.lower()
+        if "```python" in low or "def " in raw[:200]:
+            hint = (
+                "\n\nThe model returned Python instead of JSON. This is common with "
+                "small local models (e.g. Gemma 3 1B). Try a larger instruct GGUF "
+                "(7B+), set local_gguf.temperature to 0.0, or ensure llm.local_compact_prompt "
+                "is true (default for local GGUF).\n"
+            )
         raise RuntimeError(
-            "Model did not return valid JSON. Update the prompt or reduce temperature.\n"
-            f"Raw content:\n{raw}"
+            "Model did not return valid JSON. Update the prompt or reduce temperature."
+            f"{hint}\nRaw content:\n{raw}"
         ) from e
 
     if isinstance(payload, list):
@@ -263,7 +386,13 @@ def _plan_context_kwargs(
 ) -> Tuple[str, str]:
     """Return ``(allowed_text, user_content)`` for plan/repair prompts."""
     allowed = build_allowed_commands_text(registry)
+    if _use_local_compact_prompt(cfg):
+        allowed = filter_allowed_commands_text(allowed, user_text or "")
     rag_block, _ = retrieve_for_prompt(user_text or "", cfg)
+    if _use_local_compact_prompt(cfg) and rag_block:
+        cap = 1200
+        if len(rag_block) > cap:
+            rag_block = rag_block[: cap - 3] + "..."
     llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
     max_hist = 8
     if isinstance(llm, dict):
@@ -460,27 +589,18 @@ def _local_gguf_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
             n = default
         return max(lo, min(hi, n))
 
-    chat_format = str(raw.get("chat_format", "") or "").strip().lower()
-    if chat_format in {"", "auto"}:
-        cf: Optional[str] = None
-        low = model_path.lower()
-        for tag, fmt in (
-            ("gemma-3", "gemma"),
-            ("gemma-2", "gemma"),
-            ("gemma", "gemma"),
-            ("llama-3", "llama-3"),
-            ("llama3", "llama-3"),
-            ("llama-2", "llama-2"),
-            ("mistral", "mistral-instruct"),
-            ("phi-3", "phi-3"),
-            ("qwen", "qwen"),
-        ):
-            if tag in low:
-                cf = fmt
-                break
-        chat_format = cf or "chatml"
+    def _float(key: str, default: float, lo: float, hi: float) -> float:
+        v = raw.get(key)
+        try:
+            n = float(v) if v is not None and not (isinstance(v, str) and not str(v).strip()) else default
+        except (TypeError, ValueError):
+            n = default
+        return max(lo, min(hi, n))
 
-    return {
+    explicit_chat_format = str(raw.get("chat_format", "") or "").strip().lower()
+    chat_format = resolve_local_gguf_chat_format(model_path, explicit_chat_format)
+
+    resolved = {
         "model_path": model_path,
         "n_ctx": _int("n_ctx", 4096, 256, 131072, zero_means_default=True),
         "n_threads": _int(
@@ -493,9 +613,11 @@ def _local_gguf_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "n_gpu_layers": _int("n_gpu_layers", 0, -1, 200),
         "n_batch": _int("n_batch", 256, 32, 4096, zero_means_default=True),
         "max_tokens": _int("max_tokens", 1024, 16, 32768, zero_means_default=True),
+        "temperature": _float("temperature", 0.1, 0.0, 2.0),
         "chat_format": chat_format,
         "verbose": bool(raw.get("verbose", False)),
     }
+    return apply_gemma3_load_defaults(resolved)
 
 
 def _load_local_gguf_model(settings: Dict[str, Any]) -> Any:
@@ -548,15 +670,13 @@ def _load_local_gguf_model(settings: Dict[str, Any]) -> Any:
         if cached is not None:
             return cached
         try:
-            model = Llama(
-                model_path=model_path,
-                n_ctx=int(settings.get("n_ctx", 4096)),
-                n_threads=int(settings.get("n_threads", 4)),
-                n_gpu_layers=int(settings.get("n_gpu_layers", 0)),
-                n_batch=int(settings.get("n_batch", 256)),
-                chat_format=str(settings.get("chat_format") or "chatml"),
-                verbose=bool(settings.get("verbose", False)),
-            )
+            from testbench.local_gguf_models import build_llama_kwargs
+
+            if is_gemma3_model_path(model_path):
+                warn = gemma3_runtime_warning()
+                if warn:
+                    raise RuntimeError(warn)
+            model = Llama(**build_llama_kwargs(settings))
         except Exception as e:
             msg = str(e) or type(e).__name__
             if "access violation" in msg.lower() or "0x0000000000000000" in msg:
@@ -731,11 +851,13 @@ def _format_local_gguf_load_error(model_path: str, exc: BaseException) -> str:
             "from a previous load attempt — restart the application."
         )
 
-    if "gemma-3" in name or "gemma3" in name:
+    if is_gemma3_model_path(model_path):
+        warn = gemma3_runtime_warning()
+        if warn:
+            extras.append(warn)
         extras.append(
-            "Gemma 3 GGUFs require a very recent llama.cpp runtime. "
-            "Upgrade with:  pip install --upgrade --prefer-binary llama-cpp-python "
-            "or try a Gemma 2 / Llama-3 / Phi-3 / Qwen2.5 GGUF instead."
+            "Gemma 3 uses chat_format=gemma in llama-cpp-python. Set chat_format to "
+            "'gemma-3' or 'auto' in LLM settings; use a Q4_K_M / Q5_K_M instruct GGUF."
         )
     elif is_access_violation and not (likely_oom or plenty_of_ram):
         extras.append(
@@ -1021,16 +1143,19 @@ def _local_gguf_chat(
     """Chat-completion via isolated subprocess (default) or in-process fallback."""
     settings = _local_gguf_settings(cfg)
     mt = int(max_tokens if max_tokens is not None else settings.get("max_tokens", 1024))
+    temp = float(
+        temperature if temperature is not None else settings.get("temperature", 0.1)
+    )
     settings = _ensure_local_gguf_n_ctx(settings, messages, mt)
     if _use_local_gguf_subprocess():
         return _local_gguf_chat_via_subprocess(
-            messages, settings, cfg, temperature=temperature, max_tokens=mt
+            messages, settings, cfg, temperature=temp, max_tokens=mt
         )
     model = _load_local_gguf_model(settings)
     try:
         resp = model.create_chat_completion(
             messages=messages,
-            temperature=float(temperature),
+            temperature=temp,
             max_tokens=mt,
         )
     except Exception as e:
@@ -1059,10 +1184,10 @@ def _local_gguf_chat_to_plan(
         last_commands=last_commands,
     )
     messages: List[Dict[str, str]] = [
-        {"role": "system", "content": _system_prompt()},
+        {"role": "system", "content": _plan_system_prompt(cfg)},
         {"role": "user", "content": user_content},
     ]
-    content = _local_gguf_chat(messages, cfg, temperature=0.2)
+    content = _local_gguf_chat(messages, cfg)
     return _parse_plan_response(content, cfg)
 
 

@@ -162,7 +162,7 @@
     "api_key": "DbkRYPFQON3G8rcUs3MaoJz17lgBsWFYTxw7bI7dHHO2J9vRmb9eJQQJ99CEACHYHv6XJ3w3AAAAACOGSDHd"
   },
   "llm": {
-    "provider": "local_gguf",
+    "provider": "azure_openai",
     "timeout_seconds": 240,
     "auto_analyze_results": true,
     "chat_mode": "plan",
@@ -180,9 +180,9 @@
     "base_url": ""
   },
   "local_gguf": {
-    "model_path": "C:/git/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-    "chat_format": "qwen",
-    "n_ctx": 4096,
+    "model_path": "C:/git/models/gemma-3-4b-it-Q4_K_M.gguf",
+    "chat_format": "gemma-3",
+    "n_ctx": 8192,
     "n_gpu_layers": 0,
     "n_threads": 0,
     "max_tokens": 512,

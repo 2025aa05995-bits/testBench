@@ -31,6 +31,25 @@ If the package is missing, the app falls back to TF–IDF automatically.
    prepended to the LLM prompt as a `CONTEXT:` block.
 3. The index auto-refreshes when files change (mtime/size based).
 
+## Captured sequences (RAG mode)
+
+When the main window chat mode is **RAG**, manual command sequences are saved here
+under `sequences/` (one `.md` file per capture). An optional **first line** is
+stored as the sequence tag (e.g. `Power Cycle`); if you omit a tag, the file is
+still saved using a timestamped name.
+
+Example input in RAG mode:
+
+```text
+Power Cycle
+bc.ps.off
+delay 1
+bc.ps.on
+```
+
+Those lines are indexed like any other document and appear in LLM `CONTEXT:` when
+you use Plan or Agent mode later.
+
 ## Chat commands
 
 - `rag <query>` — show top-k snippets that match the query (no LLM call).

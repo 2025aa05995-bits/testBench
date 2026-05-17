@@ -61,9 +61,12 @@ from gui_chat_support.constants import CONFIG_DIALOG_START, DEFAULT_GUI_FONT_PRE
 from gui_chat_support.fonts import load_gui_font_preferences, save_gui_font_preferences
 from gui_chat_support.sequences import load_test_sequences, save_test_sequences
 from gui_chat_support.automation_loop import AutomationLoopMixin
+from testbench.rag_capture import capture_rag_sequence_from_input
 from gui_chat_support.command_helpers import (
     CHAT_MODE_AGENT,
     CHAT_MODE_PLAN,
+    CHAT_MODE_RAG,
+    chat_mode_label,
     normalize_chat_mode,
     parse_analyze_keyword,
     parse_clear_llm_context_keyword,
@@ -257,10 +260,12 @@ class ChatWindow(QMainWindow, AutomationLoopMixin):
         mode_row.setSpacing(8)
         mode_row.addWidget(QLabel('LLM chat mode:'))
         self._chat_mode_combo = QComboBox()
-        self._chat_mode_combo.addItems(['Agent', 'Plan'])
+        self._chat_mode_combo.addItems(['Agent', 'Plan', 'RAG'])
         self._chat_mode_combo.setToolTip(
-            'Agent: run generated bench/bc commands immediately. '
-            'Plan: show the proposed list first — type run or go to execute, or discard to cancel.'
+            'Agent: LLM runs proposals immediately. '
+            'Plan: review LLM commands, then run or discard. '
+            'RAG: no LLM — enter an optional tag line plus bc.* commands; '
+            'the sequence is saved to rag_docs/sequences/ for later LLM context, then executed.'
         )
         self._chat_mode_combo.currentIndexChanged.connect(self._on_chat_mode_combo_changed)
         mode_row.addWidget(self._chat_mode_combo, 0)
@@ -378,6 +383,10 @@ class ChatWindow(QMainWindow, AutomationLoopMixin):
             "RAG: drop reference docs in rag_docs/. Use 'rag <query>' to preview matches, "
             "'rag reload' to reindex, 'rag status' for the current index.\n"
         )
+        self._append_text(
+            "RAG mode (toolbar): no LLM. Optional first line = sequence tag (e.g. Power Cycle), "
+            "then bc.* / bench.* lines — saved under rag_docs/sequences/ and run on the bench.\n"
+        )
         self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
         self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
         self._append_text('Delay: use delay 10 to wait 10 seconds before the next command; Send becomes Stop.\n')
@@ -399,14 +408,40 @@ class ChatWindow(QMainWindow, AutomationLoopMixin):
         self._chat_mode = normalize_chat_mode(llm.get('chat_mode'))
 
     def _sync_chat_mode_combo(self) -> None:
-        idx = 1 if self._chat_mode == CHAT_MODE_PLAN else 0
+        if self._chat_mode == CHAT_MODE_PLAN:
+            idx = 1
+        elif self._chat_mode == CHAT_MODE_RAG:
+            idx = 2
+        else:
+            idx = 0
         self._chat_mode_combo.blockSignals(True)
         self._chat_mode_combo.setCurrentIndex(idx)
         self._chat_mode_combo.blockSignals(False)
+        self._update_input_placeholder_for_chat_mode()
 
     def _on_chat_mode_combo_changed(self, index: int) -> None:
-        self._chat_mode = CHAT_MODE_PLAN if int(index) == 1 else CHAT_MODE_AGENT
+        i = int(index)
+        if i == 1:
+            self._chat_mode = CHAT_MODE_PLAN
+        elif i == 2:
+            self._chat_mode = CHAT_MODE_RAG
+        else:
+            self._chat_mode = CHAT_MODE_AGENT
+        self._update_input_placeholder_for_chat_mode()
         self.update_status_bar()
+
+    def _update_input_placeholder_for_chat_mode(self) -> None:
+        if self._chat_mode == CHAT_MODE_RAG:
+            self.input_line.setPlaceholderText(
+                "RAG mode: optional tag on first line (e.g. Power Cycle), then commands:\n"
+                "bc.ps.off\n"
+                "delay 1\n"
+                "bc.ps.on"
+            )
+        else:
+            self.input_line.setPlaceholderText(
+                "Type bench commands (bc.*), natural language for LLM, or help"
+            )
 
     def _clear_pending_plan(self) -> None:
         self._pending_plan_commands = None
@@ -1074,6 +1109,11 @@ class ChatWindow(QMainWindow, AutomationLoopMixin):
             self._handle_rag_command(*rag_action)
             return
 
+        if self._chat_mode == CHAT_MODE_RAG:
+            self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+            self._handle_rag_mode_capture(raw_text)
+            return
+
         if not looks_like_direct_command(raw_text):
             self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
             self._append_text("Generating commands with LLM...\n")
@@ -1172,7 +1212,7 @@ class ChatWindow(QMainWindow, AutomationLoopMixin):
         else:
             mode = "Mixed"
         instruments = ", ".join(sorted([k for k in self.registry.instruments.keys() if k != 'config']))
-        chat_label = "Plan" if self._chat_mode == CHAT_MODE_PLAN else "Agent"
+        chat_label = chat_mode_label(self._chat_mode)
         pending = " | Plan pending" if self._pending_plan_commands else ""
         self.status_bar.showMessage(
             f"Mode: {mode} | Instruments: {instruments} | LLM chat: {chat_label}{pending}"
@@ -1574,12 +1614,14 @@ class ChatWindow(QMainWindow, AutomationLoopMixin):
         auto_analyze_cb.setChecked(bool(_aa_cur))
 
         chat_mode_combo = QComboBox()
-        chat_mode_combo.addItems(['Agent', 'Plan'])
+        chat_mode_combo.addItems(['Agent', 'Plan', 'RAG'])
         cm_cur = normalize_chat_mode(llm.get('chat_mode'))
-        chat_mode_combo.setCurrentIndex(1 if cm_cur == CHAT_MODE_PLAN else 0)
+        chat_mode_combo.setCurrentIndex(
+            1 if cm_cur == CHAT_MODE_PLAN else (2 if cm_cur == CHAT_MODE_RAG else 0)
+        )
         chat_mode_combo.setToolTip(
-            'Default for the LLM chat mode control on the main window. '
-            'Plan shows proposed commands before execution.'
+            'Default chat mode: Agent / Plan use the LLM; RAG saves manual sequences to '
+            'rag_docs/sequences/ without calling the LLM.'
         )
 
         loop_cfg = AutomationLoopConfig.from_config(config)
@@ -1683,13 +1725,15 @@ class ChatWindow(QMainWindow, AutomationLoopMixin):
         form_lg.addRow('Model file', path_holder)
 
         lg_chat_format = QComboBox()
-        lg_chat_format.addItems(['auto', 'gemma', 'llama-3', 'llama-2', 'mistral-instruct', 'phi-3', 'qwen', 'chatml'])
+        lg_chat_format.addItems(
+            ['auto', 'gemma-3', 'gemma', 'llama-3', 'llama-2', 'mistral-instruct', 'phi-3', 'qwen', 'chatml']
+        )
         cf_cur = str(lg.get('chat_format', 'auto') or 'auto').lower() or 'auto'
         cf_idx = lg_chat_format.findText(cf_cur)
         lg_chat_format.setCurrentIndex(cf_idx if cf_idx >= 0 else 0)
         lg_chat_format.setToolTip(
             'Prompt template. "auto" picks one based on the filename '
-            '(gemma → gemma, llama-3 → llama-3, etc.).'
+            '(gemma-3 / gemma → gemma template, llama-3 → llama-3, etc.).'
         )
 
         lg_n_ctx = QSpinBox()
@@ -1884,7 +1928,11 @@ class ChatWindow(QMainWindow, AutomationLoopMixin):
                     'timeout_seconds': tsec,
                     'auto_analyze_results': bool(auto_analyze_cb.isChecked()),
                     'chat_mode': (
-                        CHAT_MODE_PLAN if chat_mode_combo.currentIndex() == 1 else CHAT_MODE_AGENT
+                        CHAT_MODE_PLAN
+                        if chat_mode_combo.currentIndex() == 1
+                        else (
+                            CHAT_MODE_RAG if chat_mode_combo.currentIndex() == 2 else CHAT_MODE_AGENT
+                        )
                     ),
                     'automation_loop': {
                         'enabled': bool(auto_loop_cb.isChecked()),
@@ -1920,6 +1968,26 @@ class ChatWindow(QMainWindow, AutomationLoopMixin):
         close_btn.clicked.connect(dialog.reject)
 
         dialog.exec_()
+
+    def _handle_rag_mode_capture(self, raw_text: str) -> None:
+        cfg = self.registry.config_manager.config or {}
+        outcome = capture_rag_sequence_from_input(raw_text, cfg)
+        if outcome.error:
+            self._append_error(f"RAG capture: {outcome.error}\n\n")
+            return
+        safe, err = validate_llm_commands(outcome.commands, self.parser)
+        if err:
+            self._append_error(f"{err}\n\n")
+            return
+        tag_note = outcome.tag or "(no tag)"
+        rel = outcome.saved_path.name if outcome.saved_path else "?"
+        self._append_text(
+            f"RAG sequence saved ({rel}) — tag: {tag_note}. "
+            f"{len(safe)} command(s) will run.\n"
+        )
+        if self._sequence_recording:
+            self._sequence_record_buffer.extend(safe)
+        self._start_command_sequence(safe, origin="user")
 
     def _handle_rag_command(self, kind: str, query: str) -> None:
         cfg = self.registry.config_manager.config or {}

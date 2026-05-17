@@ -38,6 +38,8 @@ from gui_chat_support.automation_loop import AutomationLoopMixin
 from gui_chat_support.command_helpers import (
     CHAT_MODE_AGENT,
     CHAT_MODE_PLAN,
+    CHAT_MODE_RAG,
+    chat_mode_label,
     normalize_chat_mode,
     parse_analyze_keyword,
     parse_clear_llm_context_keyword,
@@ -48,6 +50,7 @@ from gui_chat_support.command_helpers import (
     validate_llm_commands,
 )
 from testbench.rag import index_status, reload_index, retrieve_for_prompt
+from testbench.rag_capture import capture_rag_sequence_from_input
 from gui_chat_support.command_completer import CommandCompleter
 from gui_chat_support.run_command import run_chat_command
 
@@ -181,6 +184,7 @@ try:
                 self._chat_mode_var,
                 'Agent',
                 'Plan',
+                'RAG',
                 command=lambda *_a: self._on_chat_mode_changed(),
             )
             self._chat_mode_menu.pack(side='left')
@@ -345,6 +349,10 @@ try:
                 "RAG: drop reference docs in rag_docs/. Use 'rag <query>' to preview matches, "
                 "'rag reload' to reindex, 'rag status' for the current index.\n"
             )
+            self._append_text(
+                "RAG mode (toolbar): optional tag line + bc.* commands — saved to "
+                "rag_docs/sequences/ for LLM context (no LLM call).\n"
+            )
             self._append_text("History: Up/Down recalls last commands (when suggestions are hidden).\n")
             self._append_text('Section heading: wrap the title in double quotes, e.g. "Power Cycle Test".\n')
             self._append_text('Delay: use delay 10 to wait 10 seconds before the next command; Send becomes Stop.\n')
@@ -366,10 +374,10 @@ try:
             self._chat_mode = normalize_chat_mode(llm.get('chat_mode'))
 
         def _sync_chat_mode_var(self) -> None:
-            self._chat_mode_var.set('Plan' if self._chat_mode == CHAT_MODE_PLAN else 'Agent')
+            self._chat_mode_var.set(chat_mode_label(self._chat_mode))
 
         def _on_chat_mode_changed(self) -> None:
-            self._chat_mode = CHAT_MODE_PLAN if self._chat_mode_var.get() == 'Plan' else CHAT_MODE_AGENT
+            self._chat_mode = normalize_chat_mode(self._chat_mode_var.get())
             self.update_status_label()
 
         def _clear_pending_plan(self) -> None:
@@ -992,6 +1000,11 @@ try:
                 self._handle_rag_command(*rag_action)
                 return
 
+            if self._chat_mode == CHAT_MODE_RAG:
+                self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+                self._handle_rag_mode_capture(raw_text)
+                return
+
             if not looks_like_direct_command(raw_text):
                 self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
                 self._append_text("Generating commands with LLM...\n")
@@ -1074,7 +1087,7 @@ try:
             else:
                 mode = "Mixed"
             instruments = ", ".join(sorted([k for k in self.registry.instruments.keys() if k != 'config']))
-            chat_label = "Plan" if self._chat_mode == CHAT_MODE_PLAN else "Agent"
+            chat_label = chat_mode_label(self._chat_mode)
             pending = " | Plan pending" if self._pending_plan_commands else ""
             self.status_label.config(
                 text=f"Mode: {mode} | Instruments: {instruments} | LLM chat: {chat_label}{pending}"
@@ -1281,11 +1294,11 @@ try:
             cm_row.pack(fill='x', padx=10, pady=4)
             tk.Label(cm_row, text='Default chat mode', width=14, anchor='w').pack(side='left')
             cm_cur = normalize_chat_mode(llm.get('chat_mode'))
-            chat_mode_var = tk.StringVar(value='Plan' if cm_cur == CHAT_MODE_PLAN else 'Agent')
-            tk.OptionMenu(cm_row, chat_mode_var, 'Agent', 'Plan').pack(side='left')
+            chat_mode_var = tk.StringVar(value=chat_mode_label(cm_cur))
+            tk.OptionMenu(cm_row, chat_mode_var, 'Agent', 'Plan', 'RAG').pack(side='left')
             tk.Label(
                 cm_row,
-                text='(Plan shows proposals before run)',
+                text='(RAG = save manual sequences, no LLM)',
                 anchor='w',
                 fg='#495057',
             ).pack(side='left', padx=(12, 0))
@@ -1390,7 +1403,7 @@ try:
             tk.OptionMenu(
                 cf_row,
                 cf_var,
-                'auto', 'gemma', 'llama-3', 'llama-2', 'mistral-instruct', 'phi-3', 'qwen', 'chatml',
+                'auto', 'gemma-3', 'gemma', 'llama-3', 'llama-2', 'mistral-instruct', 'phi-3', 'qwen', 'chatml',
             ).pack(side='left')
 
             def _spin(parent, label, value, lo, hi, step=1):
@@ -1499,7 +1512,7 @@ try:
                         'provider': prov,
                         'timeout_seconds': _tsec,
                         'auto_analyze_results': bool(auto_analyze_var.get()),
-                        'chat_mode': CHAT_MODE_PLAN if chat_mode_var.get() == 'Plan' else CHAT_MODE_AGENT,
+                        'chat_mode': normalize_chat_mode(chat_mode_var.get()),
                         'automation_loop': {
                             'enabled': bool(auto_loop_var.get()),
                             'max_iterations': _max_iter,
@@ -1684,6 +1697,26 @@ try:
 
             tk.Button(btnf, text='OK', command=on_ok).pack(side='left', padx=4)
             tk.Button(btnf, text='Cancel', command=top.destroy).pack(side='left', padx=4)
+
+        def _handle_rag_mode_capture(self, raw_text: str) -> None:
+            cfg = self.registry.config_manager.config or {}
+            outcome = capture_rag_sequence_from_input(raw_text, cfg)
+            if outcome.error:
+                self._append_error(f"RAG capture: {outcome.error}\n\n")
+                return
+            safe, err = validate_llm_commands(outcome.commands, self.parser)
+            if err:
+                self._append_error(f"{err}\n\n")
+                return
+            tag_note = outcome.tag or "(no tag)"
+            rel = outcome.saved_path.name if outcome.saved_path else "?"
+            self._append_text(
+                f"RAG sequence saved ({rel}) — tag: {tag_note}. "
+                f"{len(safe)} command(s) will run.\n"
+            )
+            if self._sequence_recording:
+                self._sequence_record_buffer.extend(safe)
+            self._start_command_sequence(safe, origin="user")
 
         def _handle_rag_command(self, kind: str, query: str) -> None:
             cfg = self.registry.config_manager.config or {}

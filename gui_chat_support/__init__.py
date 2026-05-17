@@ -4,6 +4,7 @@ from .command_completer import CommandCompleter
 from .command_helpers import (
     CHAT_MODE_AGENT,
     CHAT_MODE_PLAN,
+    CHAT_MODE_RAG,
     normalize_chat_mode,
     looks_like_direct_command,
     parse_analyze_keyword,
@@ -17,6 +18,7 @@ from .run_command import run_chat_command
 __all__ = [
     "CHAT_MODE_AGENT",
     "CHAT_MODE_PLAN",
+    "CHAT_MODE_RAG",
     "CommandCompleter",
     "looks_like_direct_command",
     "normalize_chat_mode",

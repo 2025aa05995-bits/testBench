@@ -110,3 +110,13 @@ if __name__ == "__main__":
 # python scripts/download_gguf.py ^
 #   "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf" ^
 #   "C:\git\models\Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+#
+# Gemma 3 (needs llama-cpp-python >= 0.3.23):
+# python scripts/download_gguf.py ^
+#   "https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_K_M.gguf" ^
+#   "C:\git\models\gemma-3-1b-it-Q4_K_M.gguf"
+#
+# Gemma 3 4B instruct (recommended for local plans):
+# python scripts/download_gguf.py ^
+#   "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf" ^
+#   "C:\git\models\gemma-3-4b-it-Q4_K_M.gguf"

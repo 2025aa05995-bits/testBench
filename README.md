@@ -175,16 +175,25 @@ Set `llm.provider` to one of:
 
 **OpenAI:** set `api_key` and `model` (`gpt-4o-mini`, etc.). Leave `base_url` empty for the default API.
 
-**Local GGUF:** set `local_gguf.model_path` to a `.gguf` file. Tune `n_ctx`, `n_gpu_layers`, `n_threads`, `max_tokens`, and `chat_format` (`qwen`, `chatml`, `llama-3`, …). Download helpers: `scripts/download_gguf.py`. If the native loader crashes, **restart the GUI** before retrying.
+**Local GGUF:** set `local_gguf.model_path` to a `.gguf` file. Tune `n_ctx`, `n_gpu_layers`, `n_threads`, `max_tokens`, and `chat_format` (`qwen`, `chatml`, `llama-3`, `gemma-3`, …). **Gemma 3** needs `llama-cpp-python>=0.3.23`; use `chat_format` `gemma-3` or `auto` (maps to the `gemma` template). Example download:
+
+```powershell
+python scripts/download_gguf.py ^
+  "https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_K_M.gguf" ^
+  "C:\git\models\gemma-3-1b-it-Q4_K_M.gguf"
+```
+
+Download helpers: `scripts/download_gguf.py`. Local inference runs in an isolated subprocess; if a load still fails, **restart the GUI** before retrying.
 
 `llm.timeout_seconds` (5–600) applies per LLM request.
 
-### Plan vs Agent mode
+### Plan vs Agent vs RAG mode
 
-Toggle in the chat toolbar or set `llm.chat_mode` to `plan` or `agent`.
+Toggle in the chat toolbar or set `llm.chat_mode` to `plan`, `agent`, or `rag`.
 
 - **Plan** — LLM returns a proposed command list and short analysis. Review, then type **`run`**, **`go`**, or **`execute`** to run the plan, or **`discard`** / **`cancel`** to drop it. Unsafe commands (`config`, `raw`) are blocked from auto-execution.
 - **Agent** — When the model returns commands that look like direct bench lines, they may run immediately (still subject to validation).
+- **RAG** — **No LLM.** Enter an optional tag line (e.g. `Power Cycle`) plus `bc.*` / `bench.*` commands. The sequence is saved under `rag_docs/sequences/` for retrieval in later Plan/Agent prompts, then executed on the bench. Prose without commands is ignored; sequences without a tag are still saved.
 
 The LLM only sees commands from your registry’s **`ACTIONS`** lists (built into the prompt allow-list).
 

@@ -34,7 +34,8 @@ openai>=1.40.0
 #   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
 #   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 # Pulls diskcache, jinja2, numpy transitively.
-llama-cpp-python>=0.3.0
+# Gemma 3 GGUF support requires >= 0.3.23 (bundled llama.cpp with gemma3 arch).
+llama-cpp-python>=0.3.23
 
 # --- Optional: embedding-based RAG (rag.backend = "embeddings" in testbenchconfig.json) ---
 # Default RAG backend is TF-IDF (no extra packages). Uncomment to install semantic search:

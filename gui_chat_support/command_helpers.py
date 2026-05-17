@@ -7,6 +7,7 @@ from testbench.command_parser import normalize_llm_command_prefix, try_parse_quo
 
 CHAT_MODE_AGENT = "agent"
 CHAT_MODE_PLAN = "plan"
+CHAT_MODE_RAG = "rag"
 _PLAN_RUN_WORDS = {"run", "go", "execute", "run plan"}
 _PLAN_DISCARD_WORDS = {"discard", "cancel", "discard plan", "cancel plan"}
 
@@ -18,7 +19,19 @@ _SET_VARIABLE_RE = re.compile(
 
 def normalize_chat_mode(value) -> str:
     s = str(value or "").strip().lower()
-    return CHAT_MODE_PLAN if s == CHAT_MODE_PLAN else CHAT_MODE_AGENT
+    if s == CHAT_MODE_PLAN:
+        return CHAT_MODE_PLAN
+    if s in {CHAT_MODE_RAG, "rag_mode", "capture"}:
+        return CHAT_MODE_RAG
+    return CHAT_MODE_AGENT
+
+
+def chat_mode_label(mode: str) -> str:
+    if mode == CHAT_MODE_PLAN:
+        return "Plan"
+    if mode == CHAT_MODE_RAG:
+        return "RAG"
+    return "Agent"
 
 
 def looks_like_direct_command(text: str) -> bool:
@@ -52,6 +65,72 @@ def looks_like_direct_command(text: str) -> bool:
         return True
     last_fragment = re.split(r"[;\n\r]+", t)[-1].strip().lower()
     return last_fragment.startswith(("bench.", "bc."))
+
+
+_SECTION_TITLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9][A-Za-z0-9 \-_/]{0,72}$")
+_WORD_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
+_ACRONYM_RE = re.compile(r"^[A-Z]{2,8}$")
+# Reject prose / error phrases masquerading as commands (any length).
+_SECTION_TITLE_STRICT_BLOCKLIST = frozenset(
+    {
+        "not",
+        "no",
+        "invalid",
+        "real",
+        "command",
+        "commands",
+        "error",
+        "failed",
+        "will",
+        "should",
+        "this",
+        "that",
+        "only",
+    }
+)
+# Extra fillers that suggest a sentence when the line is long (5+ words).
+_SECTION_TITLE_LONG_LINE_BLOCKLIST = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "with",
+        "from",
+        "for",
+        "at",
+        "all",
+    }
+)
+
+
+def _coerce_section_heading(command: str) -> Optional[str]:
+    """Turn bare LLM section titles (``Power Cycle``, ``Capture OSC``) into quoted headings."""
+    s = (command or "").strip()
+    if not s or "." in s:
+        return None
+    if try_parse_quoted_heading(s) is not None:
+        return s if s.startswith('"') else f'"{s}"'
+    low = s.lower()
+    if low.startswith(
+        ("bench.", "bc.", "delay ", "help", "plot ", "assert ", "limit ", "set ", "for ")
+    ):
+        return None
+    words = s.split()
+    if not 1 <= len(words) <= 6:
+        return None
+    if any(w.lower() in _SECTION_TITLE_STRICT_BLOCKLIST for w in words):
+        return None
+    if len(words) >= 5 and any(w.lower() in _SECTION_TITLE_LONG_LINE_BLOCKLIST for w in words):
+        return None
+    for w in words:
+        if _WORD_TOKEN_RE.match(w) or _ACRONYM_RE.match(w):
+            continue
+        return None
+    if _SECTION_TITLE_RE.match(s):
+        return f'"{s}"'
+    return None
 
 
 def parse_plan_action(text: str) -> Optional[str]:
@@ -94,6 +173,10 @@ def validate_llm_commands(commands, parser) -> Tuple[List[str], Optional[str]]:
             continue
         if try_parse_quoted_heading(c) is not None:
             safe.append(c)
+            continue
+        heading = _coerce_section_heading(c)
+        if heading is not None:
+            safe.append(heading)
             continue
         parsed = parser.parse(c)
         if not parsed:
