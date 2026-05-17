@@ -162,7 +162,7 @@
     "api_key": "DbkRYPFQON3G8rcUs3MaoJz17lgBsWFYTxw7bI7dHHO2J9vRmb9eJQQJ99CEACHYHv6XJ3w3AAAAACOGSDHd"
   },
   "llm": {
-    "provider": "local_gguf",
+    "provider": "azure_openai",
     "timeout_seconds": 240,
     "auto_analyze_results": true,
     "chat_mode": "plan"
@@ -178,12 +178,13 @@
     "n_ctx": 2048,
     "n_gpu_layers": 0,
     "n_threads": 0,
-    "n_batch": 128,
     "max_tokens": 512,
     "verbose": false
   },
   "rag": {
     "enabled": true,
+    "backend": "tfidf",
+    "embedding_model": "all-MiniLM-L6-v2",
     "dir": "rag_docs",
     "extensions": [
       ".txt",
