@@ -6,6 +6,12 @@ import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+from testbench.llm_automation_loop import (
+    build_plan_user_content,
+    build_repair_user_content,
+    repair_system_prompt,
+    trim_conversation_turns,
+)
 from testbench.llm_plan_schema import (
     finalize_plan,
     plan_schema_prompt_section,
@@ -227,7 +233,46 @@ def _parse_plan_response(content: str, cfg: Optional[Dict[str, Any]] = None) -> 
     return finalize_plan(plan, include_checks=_plan_include_checks(cfg))
 
 
-def _azure_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], timeout_sec: float) -> Tuple[List[str], str]:
+def _plan_context_kwargs(
+    user_text: str,
+    registry: Any,
+    cfg: Dict[str, Any],
+    *,
+    conversation_turns: Optional[List[Dict[str, Any]]] = None,
+    last_results: Optional[List[Dict[str, Any]]] = None,
+    last_commands: Optional[List[str]] = None,
+) -> Tuple[str, str]:
+    """Return ``(allowed_text, user_content)`` for plan/repair prompts."""
+    allowed = build_allowed_commands_text(registry)
+    rag_block, _ = retrieve_for_prompt(user_text or "", cfg)
+    llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    max_hist = 8
+    if isinstance(llm, dict):
+        from testbench.llm_automation_loop import AutomationLoopConfig
+
+        max_hist = AutomationLoopConfig.from_config(cfg).multi_turn_history
+    turns = trim_conversation_turns(conversation_turns or [], max_hist)
+    user_content = build_plan_user_content(
+        user_text,
+        allowed,
+        rag_block,
+        conversation_turns=turns,
+        last_results=last_results,
+        last_commands=last_commands,
+    )
+    return allowed, user_content
+
+
+def _azure_chat_to_plan(
+    user_text: str,
+    registry: Any,
+    cfg: Dict[str, Any],
+    timeout_sec: float,
+    *,
+    conversation_turns: Optional[List[Dict[str, Any]]] = None,
+    last_results: Optional[List[Dict[str, Any]]] = None,
+    last_commands: Optional[List[str]] = None,
+) -> Tuple[List[str], str]:
     try:
         from openai import AzureOpenAI  # type: ignore
     except Exception as e:  # pragma: no cover
@@ -256,8 +301,14 @@ def _azure_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], time
     if not deployment:
         deployment = _env("AZURE_OPENAI_DEPLOYMENT")
 
-    allowed = build_allowed_commands_text(registry)
-    rag_block, _ = retrieve_for_prompt(user_text or "", cfg)
+    _, user_content = _plan_context_kwargs(
+        user_text,
+        registry,
+        cfg,
+        conversation_turns=conversation_turns,
+        last_results=last_results,
+        last_commands=last_commands,
+    )
     client = AzureOpenAI(
         api_key=api_key,
         api_version=api_version,
@@ -265,10 +316,6 @@ def _azure_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], time
         timeout=timeout_sec,
     )
 
-    user_content = (
-        (f"CONTEXT:\n{rag_block}\n\n" if rag_block else "")
-        + f"ALLOWED:\n{allowed}\n\nREQUEST:\n{(user_text or '').strip()}"
-    )
     try:
         resp = client.chat.completions.create(
             model=deployment,
@@ -291,7 +338,16 @@ def _azure_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], time
     return _parse_plan_response(content, cfg)
 
 
-def _openai_direct_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], timeout_sec: float) -> Tuple[List[str], str]:
+def _openai_direct_chat_to_plan(
+    user_text: str,
+    registry: Any,
+    cfg: Dict[str, Any],
+    timeout_sec: float,
+    *,
+    conversation_turns: Optional[List[Dict[str, Any]]] = None,
+    last_results: Optional[List[Dict[str, Any]]] = None,
+    last_commands: Optional[List[str]] = None,
+) -> Tuple[List[str], str]:
     try:
         from openai import OpenAI  # type: ignore
     except Exception as e:  # pragma: no cover
@@ -312,18 +368,20 @@ def _openai_direct_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, An
     if not model:
         model = "gpt-4o-mini"
 
-    allowed = build_allowed_commands_text(registry)
-    rag_block, _ = retrieve_for_prompt(user_text or "", cfg)
+    _, user_content = _plan_context_kwargs(
+        user_text,
+        registry,
+        cfg,
+        conversation_turns=conversation_turns,
+        last_results=last_results,
+        last_commands=last_commands,
+    )
     kwargs: Dict[str, Any] = {"api_key": api_key, "timeout": timeout_sec}
     if base_url:
         kwargs["base_url"] = base_url.rstrip("/")
 
     client = OpenAI(**kwargs)
 
-    user_content = (
-        (f"CONTEXT:\n{rag_block}\n\n" if rag_block else "")
-        + f"ALLOWED:\n{allowed}\n\nREQUEST:\n{(user_text or '').strip()}"
-    )
     try:
         resp = client.chat.completions.create(
             model=model,
@@ -701,12 +759,22 @@ def _local_gguf_chat(
         raise RuntimeError(f"Local GGUF model returned an unexpected response: {resp!r}") from e
 
 
-def _local_gguf_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any]) -> Tuple[List[str], str]:
-    allowed = build_allowed_commands_text(registry)
-    rag_block, _ = retrieve_for_prompt(user_text or "", cfg)
-    user_content = (
-        (f"CONTEXT:\n{rag_block}\n\n" if rag_block else "")
-        + f"ALLOWED:\n{allowed}\n\nREQUEST:\n{(user_text or '').strip()}"
+def _local_gguf_chat_to_plan(
+    user_text: str,
+    registry: Any,
+    cfg: Dict[str, Any],
+    *,
+    conversation_turns: Optional[List[Dict[str, Any]]] = None,
+    last_results: Optional[List[Dict[str, Any]]] = None,
+    last_commands: Optional[List[str]] = None,
+) -> Tuple[List[str], str]:
+    _, user_content = _plan_context_kwargs(
+        user_text,
+        registry,
+        cfg,
+        conversation_turns=conversation_turns,
+        last_results=last_results,
+        last_commands=last_commands,
     )
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": _system_prompt()},
@@ -1204,7 +1272,14 @@ def llm_analyze_results(
     return _parse_analysis_response(content)
 
 
-def llm_chat_to_plan(user_text: str, registry: Any) -> Tuple[List[str], str]:
+def llm_chat_to_plan(
+    user_text: str,
+    registry: Any,
+    *,
+    conversation_turns: Optional[List[Dict[str, Any]]] = None,
+    last_results: Optional[List[Dict[str, Any]]] = None,
+    last_commands: Optional[List[str]] = None,
+) -> Tuple[List[str], str]:
     """
     Dispatch to configured LLM provider. Config in bench JSON:
 
@@ -1213,6 +1288,8 @@ def llm_chat_to_plan(user_text: str, registry: Any) -> Tuple[List[str], str]:
     - ``azure_openai.*``: endpoint, deployment, api_version, api_key
     - ``openai_api.*``: api_key, model, base_url (optional; default OpenAI cloud if base_url empty)
     - ``local_gguf.*``: model_path, n_ctx, n_threads, n_gpu_layers, n_batch, chat_format, max_tokens
+
+    Optional multi-turn context: ``conversation_turns``, ``last_results``, ``last_commands``.
 
     Environment fallbacks: standard Azure / ``OPENAI_*`` / ``LOCAL_GGUF_MODEL_PATH``.
     """
@@ -1232,8 +1309,88 @@ def llm_chat_to_plan(user_text: str, registry: Any) -> Tuple[List[str], str]:
     timeout_sec = _parse_timeout_seconds(llm or {}, aoai or {}, oa or {})
     provider = _resolve_provider(cfg)
 
+    ctx = {
+        "conversation_turns": conversation_turns,
+        "last_results": last_results,
+        "last_commands": last_commands,
+    }
     if provider == PROVIDER_LOCAL_GGUF:
-        return _local_gguf_chat_to_plan(user_text, registry, cfg)
+        return _local_gguf_chat_to_plan(user_text, registry, cfg, **ctx)
     if provider == PROVIDER_OPENAI:
-        return _openai_direct_chat_to_plan(user_text, registry, cfg, timeout_sec)
-    return _azure_chat_to_plan(user_text, registry, cfg, timeout_sec)
+        return _openai_direct_chat_to_plan(user_text, registry, cfg, timeout_sec, **ctx)
+    return _azure_chat_to_plan(user_text, registry, cfg, timeout_sec, **ctx)
+
+
+def _repair_context(
+    user_text: str,
+    results: List[Dict[str, Any]],
+    registry: Any,
+    cfg: Dict[str, Any],
+    *,
+    last_commands: Optional[List[str]] = None,
+    conversation_turns: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    allowed = build_allowed_commands_text(registry)
+    rag_query = (user_text or "").strip()
+    extra = _summarize_results_for_query(results)
+    if extra:
+        rag_query = (rag_query + "\n" + extra).strip() if rag_query else extra
+    rag_block, _ = retrieve_for_prompt(rag_query, cfg)
+    llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    max_hist = 8
+    if isinstance(llm, dict):
+        from testbench.llm_automation_loop import AutomationLoopConfig
+
+        max_hist = AutomationLoopConfig.from_config(cfg).multi_turn_history
+    turns = trim_conversation_turns(conversation_turns or [], max_hist)
+    return build_repair_user_content(
+        user_text,
+        results,
+        allowed,
+        rag_block,
+        last_commands=last_commands,
+        conversation_turns=turns,
+    )
+
+
+def llm_repair_plan(
+    user_text: str,
+    results: List[Dict[str, Any]],
+    registry: Any,
+    *,
+    last_commands: Optional[List[str]] = None,
+    conversation_turns: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[List[str], str]:
+    """
+    Suggest minimal corrective commands after a failed run.
+
+    Uses the same provider stack as :func:`llm_chat_to_plan`.
+    """
+    cfg: Dict[str, Any] = {}
+    try:
+        cfg_mgr = getattr(registry, "config_manager", None) if registry is not None else None
+        cfg = getattr(cfg_mgr, "config", {}) if cfg_mgr is not None else {}
+    except Exception:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    aoai = cfg.get("azure_openai") if isinstance(cfg.get("azure_openai"), dict) else {}
+    oa = cfg.get("openai_api") if isinstance(cfg.get("openai_api"), dict) else {}
+    timeout_sec = _parse_timeout_seconds(llm or {}, aoai or {}, oa or {})
+
+    user_content = _repair_context(
+        user_text,
+        results,
+        registry,
+        cfg,
+        last_commands=last_commands,
+        conversation_turns=conversation_turns,
+    )
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": repair_system_prompt()},
+        {"role": "user", "content": user_content},
+    ]
+    content = _chat_completion_text(cfg, messages, timeout_sec, temperature=0.15)
+    return _parse_plan_response(content, cfg)

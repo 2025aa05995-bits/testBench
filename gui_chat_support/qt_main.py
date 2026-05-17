@@ -47,12 +47,12 @@ from testbench.command_parser import CommandParser, handle_help
 from testbench.command_registry import CommandRegistry
 from testbench.runner import BenchRunner
 from testbench._paths import default_config_file
+from testbench.llm_automation_loop import AutomationLoopConfig
 from testbench.llm_chat import (
     PROVIDER_AZURE,
     PROVIDER_LOCAL_GGUF,
     PROVIDER_OPENAI,
     llm_analyze_results,
-    llm_chat_to_plan,
     llm_connection_test,
 )
 
@@ -60,13 +60,16 @@ from gui_chat_support.assets import gui_app_assets_dir, gui_app_icon_path_prefer
 from gui_chat_support.constants import CONFIG_DIALOG_START, DEFAULT_GUI_FONT_PREFS, EXAMPLE_POWER_CYCLE_COMMANDS
 from gui_chat_support.fonts import load_gui_font_preferences, save_gui_font_preferences
 from gui_chat_support.sequences import load_test_sequences, save_test_sequences
+from gui_chat_support.automation_loop import AutomationLoopMixin
 from gui_chat_support.command_helpers import (
     CHAT_MODE_AGENT,
     CHAT_MODE_PLAN,
     normalize_chat_mode,
     parse_analyze_keyword,
+    parse_clear_llm_context_keyword,
     parse_plan_action,
     parse_rag_keyword,
+    parse_repair_keyword,
     looks_like_direct_command,
     validate_llm_commands,
 )
@@ -175,7 +178,7 @@ _LAB_CHAT_STOP_QSS = """
     QPushButton#primarySendButton:pressed { background-color: #a52834; }
 """
 
-class ChatWindow(QMainWindow):
+class ChatWindow(QMainWindow, AutomationLoopMixin):
     # Queued delivery from LLM worker thread → GUI thread (do not use QTimer from background threads).
     _llm_plan_ok = pyqtSignal(object, object)
     _llm_plan_err = pyqtSignal(str)
@@ -339,6 +342,8 @@ class ChatWindow(QMainWindow):
         self._delay_timer = QTimer(self)
         self._delay_timer.setSingleShot(True)
         self._delay_timer.timeout.connect(self._on_delay_timer_done)
+        self._init_automation_loop()
+        self._llm_plan_ok_repair = False
 
         self.status_bar = self.statusBar()
         self._font_prefs = load_gui_font_preferences()
@@ -364,6 +369,10 @@ class ChatWindow(QMainWindow):
         self._append_text(
             "LLM chat mode (above): Agent runs proposals immediately; Plan shows commands first — "
             "then type run or discard. Default can be set under Settings → LLM settings.\n"
+        )
+        self._append_text(
+            "Automation loop: failed LLM runs can auto-repair (Agent mode); type 'repair' or "
+            "'repair <hint>' for a manual fix plan; 'clear llm' resets multi-turn context.\n"
         )
         self._append_text(
             "RAG: drop reference docs in rag_docs/. Use 'rag <query>' to preview matches, "
@@ -667,13 +676,24 @@ class ChatWindow(QMainWindow):
         if self._sequence_results:
             self._last_results = list(self._sequence_results)
             self._last_results_user_text = self._sequence_user_text
+        if self._finish_sequence_automation_hook():
+            return
         self._maybe_run_post_analysis()
+
+    def _emit_llm_plan_ok(self, commands, analysis, repair: bool = False) -> None:
+        self._llm_plan_ok_repair = bool(repair)
+        self._llm_plan_ok.emit(commands, analysis)
+
+    def _emit_llm_plan_err(self, msg: str) -> None:
+        self._llm_plan_err.emit(msg)
 
     def _on_delay_timer_done(self) -> None:
         if self._sequence_active:
             self._run_next_sequence_step()
 
     def _start_command_sequence(self, commands: list, origin: str = "user", user_text: str = "") -> None:
+        if origin == "llm" and commands:
+            self._store_loop_commands(list(commands))
         try:
             runner = BenchRunner(registry=self.registry, parser=self.parser)
             commands = runner.expand(list(commands))
@@ -984,40 +1004,9 @@ class ChatWindow(QMainWindow):
         self._append_error(f"{msg}\n\n")
 
     def _on_llm_plan_ok(self, commands, analysis) -> None:
-        analysis = str(analysis or "").strip()
-        safe, err = validate_llm_commands(commands, self.parser)
-        if err:
-            self._append_error(f"{err}\n\n")
-            return
-        if not safe:
-            if analysis:
-                self._append_text(f"{analysis}\n\n")
-                self._append_text("(No bench/bc commands to run — try a specific request, or type help.)\n\n")
-            else:
-                self._append_error("LLM returned no commands.\n\n")
-            return
-
-        if self._chat_mode == CHAT_MODE_PLAN:
-            if analysis:
-                self._append_text(f"{analysis}\n\n")
-            self._append_text("Proposed commands:\n")
-            for i, c in enumerate(safe, 1):
-                self._append_text(f"  {i}. {c}\n")
-            self._append_text("\nType run (or go) to execute this plan, or discard to cancel.\n\n")
-            self._pending_plan_commands = safe
-            self._pending_plan_user_text = self._pending_llm_user_text
-            self._pending_llm_user_text = ""
-            self.update_status_bar()
-            return
-
-        if analysis:
-            self._append_text(f"{analysis}\n\n")
-
-        if self._sequence_recording:
-            self._sequence_record_buffer.extend(safe)
-        self.update_status_bar()
-        self._start_command_sequence(safe, origin="llm", user_text=self._pending_llm_user_text)
-        self._pending_llm_user_text = ""
+        repair = bool(getattr(self, "_llm_plan_ok_repair", False))
+        self._llm_plan_ok_repair = False
+        self._on_llm_plan_ok_automation(commands, analysis, repair=repair)
 
     def send_command(self):
         if self._sequence_active:
@@ -1038,6 +1027,7 @@ class ChatWindow(QMainWindow):
             ut = self._pending_plan_user_text
             self._clear_pending_plan()
             if pa == "run":
+                self._store_loop_commands(cmds)
                 if self._sequence_recording:
                     self._sequence_record_buffer.extend(cmds)
                 self.update_status_bar()
@@ -1067,6 +1057,17 @@ class ChatWindow(QMainWindow):
             self._run_analyze_now(analyze_extra)
             return
 
+        repair_hint = parse_repair_keyword(raw_text)
+        if repair_hint is not None:
+            self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+            self._handle_repair_keyword(repair_hint)
+            return
+
+        if parse_clear_llm_context_keyword(raw_text):
+            self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+            self._clear_llm_conversation()
+            return
+
         rag_action = parse_rag_keyword(raw_text)
         if rag_action is not None:
             self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
@@ -1077,16 +1078,7 @@ class ChatWindow(QMainWindow):
             self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
             self._append_text("Generating commands with LLM...\n")
             self._pending_llm_user_text = raw_text
-
-            def _bg():
-                try:
-                    commands, analysis = llm_chat_to_plan(raw_text, self.registry)
-                except Exception as e:
-                    self._llm_plan_err.emit(f"LLM error: {e}")
-                    return
-                self._llm_plan_ok.emit(commands, analysis)
-
-            threading.Thread(target=_bg, daemon=True).start()
+            self._start_llm_plan_bg(raw_text)
             return
 
         commands = [cmd.strip() for cmd in re.split(r'[;\n\r]+', raw_text) if cmd.strip()]
@@ -1590,10 +1582,34 @@ class ChatWindow(QMainWindow):
             'Plan shows proposed commands before execution.'
         )
 
+        loop_cfg = AutomationLoopConfig.from_config(config)
+        auto_loop_cb = QCheckBox('Automation loop (auto-repair on FAIL/error)')
+        auto_loop_cb.setChecked(loop_cfg.enabled)
+        auto_loop_cb.setToolTip(
+            'After a failed LLM-driven sequence, ask the model for a minimal repair plan '
+            'and re-run (Agent mode runs repairs automatically; Plan mode shows commands first).'
+        )
+        auto_repair_cb = QCheckBox('Auto-repair on failure')
+        auto_repair_cb.setChecked(loop_cfg.auto_repair_on_fail)
+        closed_loop_cb = QCheckBox('Closed-loop Agent (auto-run repair steps)')
+        closed_loop_cb.setChecked(loop_cfg.closed_loop_agent)
+        max_iter_spin = QSpinBox()
+        max_iter_spin.setRange(1, 10)
+        max_iter_spin.setValue(loop_cfg.max_iterations)
+        history_spin = QSpinBox()
+        history_spin.setRange(0, 32)
+        history_spin.setValue(loop_cfg.multi_turn_history)
+        history_spin.setToolTip('Prior user/plan/result turns included in the next LLM request.')
+
         top_form.addRow('Provider', provider_combo)
         top_form.addRow('Request timeout', timeout_s)
         top_form.addRow('Auto-analyze', auto_analyze_cb)
         top_form.addRow('Default chat mode', chat_mode_combo)
+        top_form.addRow('', auto_loop_cb)
+        top_form.addRow('Max repair iterations', max_iter_spin)
+        top_form.addRow('', auto_repair_cb)
+        top_form.addRow('', closed_loop_cb)
+        top_form.addRow('Multi-turn history', history_spin)
 
         stack = QStackedWidget()
         layout.addWidget(stack)
@@ -1870,6 +1886,13 @@ class ChatWindow(QMainWindow):
                     'chat_mode': (
                         CHAT_MODE_PLAN if chat_mode_combo.currentIndex() == 1 else CHAT_MODE_AGENT
                     ),
+                    'automation_loop': {
+                        'enabled': bool(auto_loop_cb.isChecked()),
+                        'max_iterations': int(max_iter_spin.value()),
+                        'auto_repair_on_fail': bool(auto_repair_cb.isChecked()),
+                        'closed_loop_agent': bool(closed_loop_cb.isChecked()),
+                        'multi_turn_history': int(history_spin.value()),
+                    },
                 }
                 config['azure_openai'] = {
                     'endpoint': az_endpoint.text().strip(),

@@ -188,6 +188,25 @@ Toggle in the chat toolbar or set `llm.chat_mode` to `plan` or `agent`.
 
 The LLM only sees commands from your registry’s **`ACTIONS`** lists (built into the prompt allow-list).
 
+### Automation loop (repair + multi-turn)
+
+When enabled in `llm.automation_loop` (Settings → LLM settings):
+
+| Setting | Behavior |
+|---------|----------|
+| **Automation loop** | Master switch for auto-repair and multi-turn context |
+| **Max repair iterations** | Cap on automatic repair attempts per user request (default 3) |
+| **Auto-repair on failure** | After FAIL/error steps, call the LLM for a minimal fix plan |
+| **Closed-loop Agent** | In Agent mode, run repair commands automatically (Plan mode always reviews first) |
+| **Multi-turn history** | Prior request/plan/outcome turns included in the next plan prompt |
+
+**Chat commands:**
+
+- `repair` / `repair <hint>` — generate a repair plan from the last captured results (always shown for review in Plan style).
+- `clear llm` — reset multi-turn conversation context.
+
+In **Agent** mode with the loop enabled, a failed LLM sequence triggers repair automatically (up to the iteration cap), then post-run **analyze** runs when the loop finishes.
+
 ### Analyze (post-run)
 
 After a sequence (especially from an LLM plan), the app can send captured results back to the model for a summary and optional plot spec.

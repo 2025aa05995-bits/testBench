@@ -44,6 +44,10 @@ def looks_like_direct_command(text: str) -> bool:
         return True
     if tl == "analyze" or tl.startswith("analyze "):
         return True
+    if tl == "repair" or tl.startswith("repair "):
+        return True
+    if tl in {"clear llm", "clear context", "clear history"}:
+        return True
     if tl == "rag" or tl.startswith("rag "):
         return True
     last_fragment = re.split(r"[;\n\r]+", t)[-1].strip().lower()
@@ -101,6 +105,26 @@ def validate_llm_commands(commands, parser) -> Tuple[List[str], Optional[str]]:
             )
         safe.append(c)
     return safe, None
+
+
+def parse_repair_keyword(text: str):
+    """
+    Return optional operator hint for ``repair``, or ``""`` for bare ``repair``.
+
+    Returns ``None`` if the line is not a repair keyword.
+    """
+    s = (text or "").strip()
+    if not s:
+        return None
+    parts = s.split(None, 1)
+    if not parts or parts[0].lower() != "repair":
+        return None
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def parse_clear_llm_context_keyword(text: str) -> bool:
+    s = (text or "").strip().lower()
+    return s in {"clear llm", "clear context", "clear history", "clear llm context"}
 
 
 def parse_analyze_keyword(text: str):

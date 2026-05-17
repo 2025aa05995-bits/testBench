@@ -165,7 +165,14 @@
     "provider": "azure_openai",
     "timeout_seconds": 240,
     "auto_analyze_results": true,
-    "chat_mode": "plan"
+    "chat_mode": "plan",
+    "automation_loop": {
+      "enabled": true,
+      "max_iterations": 3,
+      "auto_repair_on_fail": true,
+      "closed_loop_agent": true,
+      "multi_turn_history": 8
+    }
   },
   "openai_api": {
     "api_key": "",

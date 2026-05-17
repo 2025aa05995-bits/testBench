@@ -20,6 +20,7 @@ from testbench.command_parser import CommandParser, handle_help
 from testbench.command_registry import CommandRegistry
 from testbench.runner import BenchRunner
 from testbench._paths import default_config_file
+from testbench.llm_automation_loop import AutomationLoopConfig
 from testbench.llm_chat import (
     PROVIDER_AZURE,
     PROVIDER_LOCAL_GGUF,
@@ -33,13 +34,16 @@ from gui_chat_support.assets import gui_app_assets_dir, gui_app_icon_path_prefer
 from gui_chat_support.constants import CONFIG_DIALOG_START, DEFAULT_GUI_FONT_PREFS, EXAMPLE_POWER_CYCLE_COMMANDS
 from gui_chat_support.fonts import load_gui_font_preferences, save_gui_font_preferences
 from gui_chat_support.sequences import load_test_sequences, save_test_sequences
+from gui_chat_support.automation_loop import AutomationLoopMixin
 from gui_chat_support.command_helpers import (
     CHAT_MODE_AGENT,
     CHAT_MODE_PLAN,
     normalize_chat_mode,
     parse_analyze_keyword,
+    parse_clear_llm_context_keyword,
     parse_plan_action,
     parse_rag_keyword,
+    parse_repair_keyword,
     looks_like_direct_command,
     validate_llm_commands,
 )
@@ -56,7 +60,7 @@ try:
     from tkinter.scrolledtext import ScrolledText
     from tkinter import filedialog
     from tkinter import messagebox
-    class ChatWindow:
+    class ChatWindow(AutomationLoopMixin):
         def __init__(self):
             self.root = tk.Tk()
             self.root.title('Lab Automation Chat')
@@ -312,6 +316,7 @@ try:
             self._test_sequences = load_test_sequences()
             self._delay_after_id = None
             self._pending_step_after_id = None
+            self._init_automation_loop()
 
             self._append_text('Lab Automation Chat\n')
             self._append_text("Type 'help' for available commands\n")
@@ -331,6 +336,10 @@ try:
             self._append_text(
                 "LLM chat mode (above): Agent runs proposals immediately; Plan shows commands first — "
                 "then type run or discard. Default can be set under Settings → LLM settings.\n"
+            )
+            self._append_text(
+                "Automation loop: failed LLM runs can auto-repair (Agent mode); type 'repair' or "
+                "'repair <hint>' for a manual fix plan; 'clear llm' resets multi-turn context.\n"
             )
             self._append_text(
                 "RAG: drop reference docs in rag_docs/. Use 'rag <query>' to preview matches, "
@@ -572,7 +581,18 @@ try:
             if self._sequence_results:
                 self._last_results = list(self._sequence_results)
                 self._last_results_user_text = self._sequence_user_text
+            if self._finish_sequence_automation_hook():
+                return
             self._maybe_run_post_analysis()
+
+        def _emit_llm_plan_ok(self, commands, analysis, repair: bool = False) -> None:
+            def _apply():
+                self._on_llm_plan_ok_automation(commands, analysis, repair=repair)
+
+            self.root.after(0, _apply)
+
+        def _emit_llm_plan_err(self, msg: str) -> None:
+            self.root.after(0, lambda: self._append_error(f"{msg}\n\n"))
 
         def _schedule_next_sequence_step(self, delay_ms: int = 0) -> None:
             self._cancel_after_id('_pending_step_after_id')
@@ -584,6 +604,8 @@ try:
                 self._run_next_sequence_step()
 
         def _start_command_sequence(self, commands: list, origin: str = "user", user_text: str = "") -> None:
+            if origin == "llm" and commands:
+                self._store_loop_commands(list(commands))
             try:
                 runner = BenchRunner(registry=self.registry, parser=self.parser)
                 commands = runner.expand(list(commands))
@@ -923,6 +945,7 @@ try:
                 ut = self._pending_plan_user_text
                 self._clear_pending_plan()
                 if pa == "run":
+                    self._store_loop_commands(cmds)
                     if self._sequence_recording:
                         self._sequence_record_buffer.extend(cmds)
                     self.update_status_label()
@@ -952,6 +975,17 @@ try:
                 self._run_analyze_now(analyze_extra)
                 return
 
+            repair_hint = parse_repair_keyword(raw_text)
+            if repair_hint is not None:
+                self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+                self._handle_repair_keyword(repair_hint)
+                return
+
+            if parse_clear_llm_context_keyword(raw_text):
+                self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
+                self._clear_llm_conversation()
+                return
+
             rag_action = parse_rag_keyword(raw_text)
             if rag_action is not None:
                 self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
@@ -962,54 +996,7 @@ try:
                 self._append_text(f'[{self._timestamp()}] You: {raw_text}\n')
                 self._append_text("Generating commands with LLM...\n")
                 self._pending_llm_user_text = raw_text
-
-                def _bg():
-                    try:
-                        commands, analysis = llm_chat_to_plan(raw_text, self.registry)
-                    except Exception as e:
-                        self.root.after(0, lambda: self._append_error(f"LLM error: {e}\n\n"))
-                        return
-
-                    def _apply():
-                        analysis_s = str(analysis or "").strip()
-                        safe, err = validate_llm_commands(commands, self.parser)
-                        if err:
-                            self._append_error(f"{err}\n\n")
-                            return
-                        if not safe:
-                            if analysis_s:
-                                self._append_text(f"{analysis_s}\n\n")
-                                self._append_text(
-                                    '(No bench/bc commands to run — try a specific request, or type help.)\n\n'
-                                )
-                            else:
-                                self._append_error("LLM returned no commands.\n\n")
-                            return
-
-                        if self._chat_mode == CHAT_MODE_PLAN:
-                            if analysis_s:
-                                self._append_text(f"{analysis_s}\n\n")
-                            self._append_text("Proposed commands:\n")
-                            for i, c in enumerate(safe, 1):
-                                self._append_text(f"  {i}. {c}\n")
-                            self._append_text("\nType run (or go) to execute this plan, or discard to cancel.\n\n")
-                            self._pending_plan_commands = safe
-                            self._pending_plan_user_text = self._pending_llm_user_text
-                            self._pending_llm_user_text = ""
-                            self.update_status_label()
-                            return
-
-                        if analysis_s:
-                            self._append_text(f"{analysis_s}\n\n")
-                        if self._sequence_recording:
-                            self._sequence_record_buffer.extend(safe)
-                        self.update_status_label()
-                        self._start_command_sequence(safe, origin="llm", user_text=self._pending_llm_user_text)
-                        self._pending_llm_user_text = ""
-
-                    self.root.after(0, _apply)
-
-                threading.Thread(target=_bg, daemon=True).start()
+                self._start_llm_plan_bg(raw_text)
                 return
 
             commands = [cmd.strip() for cmd in re.split(r'[;\n\r]+', raw_text) if cmd.strip()]
@@ -1303,6 +1290,42 @@ try:
                 fg='#495057',
             ).pack(side='left', padx=(12, 0))
 
+            loop_cfg = AutomationLoopConfig.from_config(cfg)
+            loop_row = tk.Frame(top)
+            loop_row.pack(fill='x', padx=10, pady=4)
+            auto_loop_var = tk.BooleanVar(value=loop_cfg.enabled)
+            tk.Checkbutton(
+                loop_row,
+                text='Automation loop (auto-repair on FAIL/error)',
+                variable=auto_loop_var,
+                anchor='w',
+            ).pack(side='left')
+            iter_row = tk.Frame(top)
+            iter_row.pack(fill='x', padx=10, pady=2)
+            tk.Label(iter_row, text='Max repair iterations', width=18, anchor='w').pack(side='left')
+            max_iter_var = tk.StringVar(value=str(loop_cfg.max_iterations))
+            tk.Spinbox(iter_row, from_=1, to=10, textvariable=max_iter_var, width=6).pack(side='left')
+            ar_row = tk.Frame(top)
+            ar_row.pack(fill='x', padx=10, pady=2)
+            auto_repair_var = tk.BooleanVar(value=loop_cfg.auto_repair_on_fail)
+            tk.Checkbutton(ar_row, text='Auto-repair on failure', variable=auto_repair_var, anchor='w').pack(
+                side='left'
+            )
+            cl_row = tk.Frame(top)
+            cl_row.pack(fill='x', padx=10, pady=2)
+            closed_loop_var = tk.BooleanVar(value=loop_cfg.closed_loop_agent)
+            tk.Checkbutton(
+                cl_row,
+                text='Closed-loop Agent (auto-run repair steps)',
+                variable=closed_loop_var,
+                anchor='w',
+            ).pack(side='left')
+            hist_row = tk.Frame(top)
+            hist_row.pack(fill='x', padx=10, pady=2)
+            tk.Label(hist_row, text='Multi-turn history', width=18, anchor='w').pack(side='left')
+            history_var = tk.StringVar(value=str(loop_cfg.multi_turn_history))
+            tk.Spinbox(hist_row, from_=0, to=32, textvariable=history_var, width=6).pack(side='left')
+
             body = tk.Frame(top)
             body.pack(fill='both', expand=True, padx=10, pady=6)
 
@@ -1464,11 +1487,26 @@ try:
                     prov = prov_var.get()
                     if prov not in (PROVIDER_AZURE, PROVIDER_OPENAI, PROVIDER_LOCAL_GGUF):
                         prov = PROVIDER_AZURE
+                    try:
+                        _max_iter = max(1, min(10, int(max_iter_var.get())))
+                    except (TypeError, ValueError):
+                        _max_iter = 3
+                    try:
+                        _hist = max(0, min(32, int(history_var.get())))
+                    except (TypeError, ValueError):
+                        _hist = 8
                     cfg['llm'] = {
                         'provider': prov,
                         'timeout_seconds': _tsec,
                         'auto_analyze_results': bool(auto_analyze_var.get()),
                         'chat_mode': CHAT_MODE_PLAN if chat_mode_var.get() == 'Plan' else CHAT_MODE_AGENT,
+                        'automation_loop': {
+                            'enabled': bool(auto_loop_var.get()),
+                            'max_iterations': _max_iter,
+                            'auto_repair_on_fail': bool(auto_repair_var.get()),
+                            'closed_loop_agent': bool(closed_loop_var.get()),
+                            'multi_turn_history': _hist,
+                        },
                     }
                     cfg['azure_openai'] = {
                         'endpoint': endpoint.get().strip(),
