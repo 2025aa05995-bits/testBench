@@ -17,6 +17,9 @@ openai>=1.40.0
 # Then point Settings → LLM settings → Local GGUF at a .gguf file.
 llama-cpp-python>=0.3.0
 
+# Optional: semantic RAG (set rag.backend to "embeddings" in testbenchconfig.json)
+# sentence-transformers>=3.0.0
+
 # Development
 pytest>=7.0.0
 pytest-cov>=4.0.0

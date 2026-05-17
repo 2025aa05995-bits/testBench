@@ -223,6 +223,10 @@ class ChatWindow(QMainWindow):
 
         self.test_sequence_menu = self.menuBar().addMenu('Test Sequence')
 
+        bench_menu = self.menuBar().addMenu('Bench')
+        bench_menu.addAction('Discover devices…').triggered.connect(self._discover_devices_dialog)
+        bench_menu.addAction('Bind instrument…').triggered.connect(self._open_bind_instrument_dialog)
+
         settings_menu = self.menuBar().addMenu('Settings')
         settings_action = settings_menu.addAction('Bench Settings')
         settings_action.triggered.connect(self.open_bench_settings)
@@ -1181,6 +1185,121 @@ class ChatWindow(QMainWindow):
         self.status_bar.showMessage(
             f"Mode: {mode} | Instruments: {instruments} | LLM chat: {chat_label}{pending}"
         )
+
+    def _discover_devices_dialog(self) -> None:
+        """Run VISA/serial discovery off the UI thread and show results."""
+        self._append_text('Discovering devices (background)…\n')
+
+        def _bg():
+            try:
+                devices = self.registry.config_manager.discover_available_devices()
+            except Exception as e:
+                self._append_error(f'Discovery error: {e}\n\n')
+                return
+            lines = ['Device discovery results:']
+            for section, entries in devices.items():
+                lines.append(f'  {section}:')
+                if not entries:
+                    lines.append('    (none)')
+                else:
+                    for entry in entries:
+                        lines.append(f'    {entry}')
+            self._append_text('\n'.join(lines) + '\n\n')
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _open_bind_instrument_dialog(self) -> None:
+        """Bind a discovered or typed address to an instrument category."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Bind instrument address')
+        form = QFormLayout(dlg)
+
+        cat_combo = QComboBox()
+        cats = sorted(
+            c for c in self.registry.instruments.keys() if c != 'config'
+        )
+        cat_combo.addItems(cats)
+
+        transport_combo = QComboBox()
+        transport_combo.addItems(['visa', 'serial', 'tcp'])
+
+        address_edit = QLineEdit()
+        address_edit.setPlaceholderText('e.g. GPIB0::1::INSTR or COM3 or 192.168.1.10:5025')
+
+        discover_btn = QPushButton('Discover…')
+        pick_list = QListWidget()
+        pick_list.setMaximumHeight(120)
+
+        def _on_discover():
+            discover_btn.setEnabled(False)
+            pick_list.clear()
+
+            def _bg():
+                try:
+                    devices = self.registry.config_manager.discover_available_devices()
+                except Exception as e:
+                    self._append_error(f'Discovery error: {e}\n\n')
+                    discover_btn.setEnabled(True)
+                    return
+                items = []
+                for section, entries in devices.items():
+                    for entry in entries:
+                        items.append(f'{section}: {entry}')
+                def _fill():
+                    pick_list.addItems(items or ['(no devices found)'])
+                    discover_btn.setEnabled(True)
+                QTimer.singleShot(0, _fill)
+
+            threading.Thread(target=_bg, daemon=True).start()
+
+        discover_btn.clicked.connect(_on_discover)
+
+        def _on_pick():
+            row = pick_list.currentItem()
+            if not row:
+                return
+            text = row.text()
+            if ':' in text:
+                _, _, rest = text.partition(': ')
+                address_edit.setText(rest.strip())
+                if text.startswith('serial:'):
+                    transport_combo.setCurrentText('serial')
+                elif text.startswith('tcp'):
+                    transport_combo.setCurrentText('tcp')
+                else:
+                    transport_combo.setCurrentText('visa')
+
+        pick_list.itemDoubleClicked.connect(lambda _: _on_pick())
+
+        form.addRow('Category', cat_combo)
+        form.addRow('Transport', transport_combo)
+        form.addRow('Address', address_edit)
+        form.addRow(discover_btn, pick_list)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        category = cat_combo.currentText().strip()
+        transport = transport_combo.currentText().strip()
+        address = address_edit.text().strip()
+        if not address:
+            QMessageBox.warning(self, 'Bind instrument', 'Address is required.')
+            return
+        try:
+            cmd = f'bc.config.bind {category} {transport} {address}'
+            parsed = self.parser.parse(cmd)
+            if not parsed:
+                raise ValueError('Invalid bind command')
+            result = self.registry.execute(parsed['category'], parsed['action'], parsed['args'])
+            self._reload_after_config_change(str(result))
+            self._append_text(f'{result}\n\n')
+        except Exception as e:
+            QMessageBox.critical(self, 'Bind failed', str(e))
 
     def save_log(self):
         text = self.chat_display.toPlainText()

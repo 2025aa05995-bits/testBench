@@ -1,14 +1,16 @@
 from typing import Dict, Any, Optional
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import NetworkAnalyzerBase
 
 
-class SimulatedNetworkAnalyzer(NetworkAnalyzerBase):
+class SimulatedNetworkAnalyzer(NetworkAnalyzerBase, SimulatedInstrumentMixin):
     """Simulated network analyzer for testing without real hardware."""
 
-    ACTIONS = {
+    ACTIONS = merge_simulated_actions({
         'calibrate': 'Run calibration (full, isolation, or through)',
         'cal': 'Run calibration (full, isolation, or through)',
-    }
+        'measure_s_parameters': 'Return simulated S-parameter dict',
+    })
 
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_NA_01")
@@ -96,7 +98,9 @@ class SimulatedNetworkAnalyzer(NetworkAnalyzerBase):
             raise ValueError(f"Unknown parameter: {parameter}")
 
     def execute(self, action: str, args: list) -> Any:
-        if action in {'calibrate', 'cal'}:
-            return self.calibrate(args[0] if args else 'full')
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'calibrate': lambda a: self.calibrate(a[0] if a else 'full'),
+            'cal': lambda a: self.calibrate(a[0] if a else 'full'),
+            'measure_s_parameters': lambda a: self.measure_s_parameters(),
+        }
+        return self._dispatch_or_raise(action, args, handlers)

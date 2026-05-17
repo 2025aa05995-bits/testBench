@@ -10,6 +10,11 @@ CHAT_MODE_PLAN = "plan"
 _PLAN_RUN_WORDS = {"run", "go", "execute", "run plan"}
 _PLAN_DISCARD_WORDS = {"discard", "cancel", "discard plan", "cancel plan"}
 
+# Script variables: set $Vnom 3.3 | set VNOM 3.3 | set v_nom 3.3 — not prose "Set the supply..."
+_SET_VARIABLE_RE = re.compile(
+    r"^(?i:set)\s+(?:\$[A-Za-z_]\w*|[A-Z][A-Z0-9_]*|[a-z_][a-z0-9_]*_[a-z0-9_]+)\s+\S",
+)
+
 
 def normalize_chat_mode(value) -> str:
     s = str(value or "").strip().lower()
@@ -35,7 +40,7 @@ def looks_like_direct_command(text: str) -> bool:
         return True
     if tl.startswith("assert ") or tl.startswith("limit "):
         return True
-    if tl.startswith("set "):
+    if _SET_VARIABLE_RE.match(t):
         return True
     if tl == "analyze" or tl.startswith("analyze "):
         return True

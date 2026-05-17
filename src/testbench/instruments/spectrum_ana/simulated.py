@@ -1,18 +1,19 @@
 import math
 import random
 from typing import Dict, Any, List, Optional
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import SpectrumAnalyzerBase
 
 
-class SimulatedSpectrumAnalyzer(SpectrumAnalyzerBase):
+class SimulatedSpectrumAnalyzer(SpectrumAnalyzerBase, SimulatedInstrumentMixin):
     """Simulated spectrum analyzer for testing without real hardware."""
 
-    ACTIONS = {
+    ACTIONS = merge_simulated_actions({
         'start_sweep': 'Start frequency sweep',
         'stop_sweep': 'Stop frequency sweep',
         'get_trace': 'Return frequencies (Hz) and data (dBm) for the current sweep',
         'measure_peak': 'Return the peak frequency (Hz) and power (dBm)',
-    }
+    })
 
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_SA_01")
@@ -146,14 +147,10 @@ class SimulatedSpectrumAnalyzer(SpectrumAnalyzerBase):
             raise ValueError(f"Unknown parameter: {parameter}")
 
     def execute(self, action: str, args: list) -> Any:
-        if action == 'start_sweep':
-            return self.start_sweep()
-        elif action == 'stop_sweep':
-            return self.stop_sweep()
-        elif action == 'get_trace':
-            n = int(args[0]) if args else 256
-            return self.get_trace(n)
-        elif action == 'measure_peak':
-            return self.measure_peak()
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'start_sweep': lambda a: self.start_sweep(),
+            'stop_sweep': lambda a: self.stop_sweep(),
+            'get_trace': lambda a: self.get_trace(int(a[0]) if a else 256),
+            'measure_peak': lambda a: self.measure_peak(),
+        }
+        return self._dispatch_or_raise(action, args, handlers)

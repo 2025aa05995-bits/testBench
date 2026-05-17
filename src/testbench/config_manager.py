@@ -217,6 +217,43 @@ class ConfigManager:
             'tcp_ip': self.discover_tcp_instruments(),
         }
 
+    def bind_instrument(self, category: str, transport: str, address: str) -> Dict[str, Any]:
+        """Bind a discovered address to an instrument category and save config.
+
+        Args:
+            category: Instrument key (e.g. ``ps``)
+            transport: ``visa``, ``serial``, or ``tcp``
+            address: VISA resource, COM port, or ``host:port`` for TCP
+        """
+        instrument = self.get_instrument_config(category)
+        if instrument is None:
+            raise ValueError(f"Unknown instrument category: {category}")
+
+        t = (transport or "").strip().lower()
+        addr = (address or "").strip()
+        if not addr:
+            raise ValueError("Address is required")
+
+        if t in {"visa", "usb"}:
+            instrument["protocol"] = "VISA"
+            instrument["visa_resource"] = addr
+        elif t == "serial":
+            instrument["protocol"] = "Serial"
+            instrument["serial_port"] = addr
+        elif t in {"tcp", "tcp/ip", "ip"}:
+            instrument["protocol"] = "TCP/IP"
+            if ":" in addr:
+                host, _, port_s = addr.partition(":")
+                instrument["ip_address"] = host
+                instrument["port"] = int(port_s)
+            else:
+                instrument["ip_address"] = addr
+        else:
+            raise ValueError(f"Unknown transport: {transport} (use visa, serial, or tcp)")
+
+        self.save_config()
+        return dict(instrument)
+
     def set_simulation(self, category: str, simulate: bool) -> None:
         """Toggle simulation mode for a specific instrument."""
         instrument = self.get_instrument_config(category)

@@ -1,14 +1,17 @@
 from typing import Dict, Any, Optional
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import SignalAnalyzerBase
 
 
-class SimulatedSignalAnalyzer(SignalAnalyzerBase):
+class SimulatedSignalAnalyzer(SignalAnalyzerBase, SimulatedInstrumentMixin):
     """Simulated signal analyzer for testing without real hardware."""
 
-    ACTIONS = {
+    ACTIONS = merge_simulated_actions({
         'start': 'Start signal capture',
         'stop': 'Stop signal capture',
-    }
+        'measure_power': 'Measure RF power',
+        'get_spectrum': 'Return spectrum trace dict',
+    })
 
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_SAN_01")
@@ -108,9 +111,10 @@ class SimulatedSignalAnalyzer(SignalAnalyzerBase):
             raise ValueError(f"Unknown parameter: {parameter}")
 
     def execute(self, action: str, args: list) -> Any:
-        if action == 'start':
-            return self.start_capture()
-        elif action == 'stop':
-            return self.stop_capture()
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'start': lambda a: self.start_capture(),
+            'stop': lambda a: self.stop_capture(),
+            'measure_power': lambda a: self.sim_apply_noise_optional(self.measure_power()),
+            'get_spectrum': lambda a: self.get_spectrum(),
+        }
+        return self._dispatch_or_raise(action, args, handlers)

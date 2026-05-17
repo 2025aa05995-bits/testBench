@@ -1,14 +1,17 @@
 import random
 from typing import Dict, Any, Optional
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import TemperatureChamberBase
 
 
-class SimulatedTemperatureChamber(TemperatureChamberBase):
+class SimulatedTemperatureChamber(TemperatureChamberBase, SimulatedInstrumentMixin):
     """Simulated temperature chamber for testing without real hardware."""
 
-    ACTIONS = {
-        'get_temp': 'Get current temperature',
-    }
+    ACTIONS = merge_simulated_actions({
+        'get_temp': 'Get current temperature (C)',
+        'measure_temperature': 'Get current temperature (C)',
+        'set_temperature': 'Set target temperature (C)',
+    })
 
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_TC_01")
@@ -121,7 +124,9 @@ class SimulatedTemperatureChamber(TemperatureChamberBase):
             raise ValueError(f"Unknown parameter: {parameter}")
 
     def execute(self, action: str, args: list) -> Any:
-        if action == 'get_temp':
-            return self.get_temperature()
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'get_temp': lambda a: self.sim_apply_noise_optional(self.get_temperature()),
+            'measure_temperature': lambda a: self.sim_apply_noise_optional(self.get_temperature()),
+            'set_temperature': lambda a: self.set_temperature(float(a[0])),
+        }
+        return self._dispatch_or_raise(action, args, handlers)

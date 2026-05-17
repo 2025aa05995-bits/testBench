@@ -1,17 +1,20 @@
 import math
 import random
 from typing import Dict, Any, Optional, List
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import OscilloscopeBase
 
 
-class SimulatedOscilloscope(OscilloscopeBase):
+class SimulatedOscilloscope(OscilloscopeBase, SimulatedInstrumentMixin):
     """Simulated oscilloscope for testing without real hardware."""
 
-    ACTIONS = {
+    ACTIONS = merge_simulated_actions({
         'run': 'Start oscilloscope acquisition',
         'stop': 'Stop oscilloscope acquisition',
         'get_trace': 'Return time_s and voltage_v arrays (channel [num_points])',
-    }
+        'measure_frequency': 'Measure frequency on channel (optional ch)',
+        'measure_amplitude': 'Measure amplitude on channel (optional ch)',
+    })
 
     def __init__(self, resource_name: Optional[str] = None, num_channels: int = 4):
         super().__init__(resource_name or "SIM_OSC_01")
@@ -159,13 +162,18 @@ class SimulatedOscilloscope(OscilloscopeBase):
                     self.set_voltage_scale(ch, cfg['volts_per_div'])
 
     def execute(self, action: str, args: list) -> Any:
-        if action == 'run':
-            return self.run()
-        elif action == 'stop':
-            return self.stop()
-        elif action == 'get_trace':
-            ch = int(args[0]) if args else 1
-            n = int(args[1]) if len(args) > 1 else 256
-            return self.get_trace(ch, n)
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'run': lambda a: self.run(),
+            'stop': lambda a: self.stop(),
+            'get_trace': lambda a: self.get_trace(
+                int(a[0]) if a else 1,
+                int(a[1]) if len(a) > 1 else 256,
+            ),
+            'measure_frequency': lambda a: self.sim_apply_noise_optional(
+                self.measure('frequency', int(a[0]) if a else 1)
+            ),
+            'measure_amplitude': lambda a: self.sim_apply_noise_optional(
+                self.measure('amplitude', int(a[0]) if a else 1)
+            ),
+        }
+        return self._dispatch_or_raise(action, args, handlers)

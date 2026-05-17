@@ -1,14 +1,17 @@
 from typing import Dict, Any, Optional
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import SourceMeasureUnitBase
 
 
-class SimulatedSourceMeasureUnit(SourceMeasureUnitBase):
+class SimulatedSourceMeasureUnit(SourceMeasureUnitBase, SimulatedInstrumentMixin):
     """Simulated source measure unit (SMU) for testing without real hardware."""
 
-    ACTIONS = {
+    ACTIONS = merge_simulated_actions({
         'source_on': 'Enable source output',
         'source_off': 'Disable source output',
-    }
+        'measure_voltage': 'Measure voltage (V)',
+        'measure_current': 'Measure current (A)',
+    })
 
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_SMU_01")
@@ -109,9 +112,10 @@ class SimulatedSourceMeasureUnit(SourceMeasureUnitBase):
             raise ValueError(f"Unknown parameter: {parameter}")
 
     def execute(self, action: str, args: list) -> Any:
-        if action == 'source_on':
-            return self.source_on()
-        elif action == 'source_off':
-            return self.source_off()
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'source_on': lambda a: self.source_on(),
+            'source_off': lambda a: self.source_off(),
+            'measure_voltage': lambda a: self.sim_apply_noise_optional(self.measure_voltage()),
+            'measure_current': lambda a: self.sim_apply_noise_optional(self.measure_current()),
+        }
+        return self._dispatch_or_raise(action, args, handlers)
