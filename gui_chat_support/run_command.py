@@ -1,4 +1,8 @@
-"""Execute one chat line: help, heading, plot, or bench/bc."""
+"""Execute one chat line: help, heading, plot, assert/limit, or bench/bc."""
+
+from __future__ import annotations
+
+from typing import Optional
 
 from testbench.chat_plotting import (
     plot_data_csv_path,
@@ -6,9 +10,8 @@ from testbench.chat_plotting import (
     try_extract_plot_command,
     write_plot_series_csv,
 )
-from testbench.command_parser import handle_help
-
-from .command_helpers import try_parse_quoted_heading
+from testbench.command_parser import handle_help, try_parse_quoted_heading
+from testbench.runner import BenchRunner
 
 
 def run_chat_command(
@@ -20,50 +23,31 @@ def run_chat_command(
     append_heading,
     append_plot_from_data,
     record_result=None,
+    runner: Optional[BenchRunner] = None,
 ) -> None:
     """
-    Run a single user command: help, quoted heading, plot, or bench/bc.
+    Run a single user command: help, quoted heading, plot, assert/limit, or bench/bc.
 
     If ``record_result`` is provided, it is invoked once per executable command:
 
     - on success: ``record_result(command, result=<value>)``
-    - on failure: ``record_result(command, error=<str>)``
+    - on failure: ``record_result(command, error=<str>)`` or check failure
 
     Pure UI commands (``help``, quoted headings, parse errors) are not recorded.
     """
+    bench = runner or BenchRunner(registry=registry, parser=parser)
 
-    def _emit_result(value) -> None:
-        if record_result is not None:
-            try:
-                record_result(command, result=value)
-            except Exception:
-                pass
+    def _out(msg: str) -> None:
+        append_text(msg)
 
-    def _emit_error(err) -> None:
-        if record_result is not None:
-            try:
-                record_result(command, error=str(err))
-            except Exception:
-                pass
+    def _err(msg: str) -> None:
+        append_error(msg)
 
     cmd = (command or "").strip()
     if not cmd:
         return
-    if cmd.lower() == "help":
-        response = handle_help([], registry)
-        append_text(f"\n{response}\n\n")
-        return
-    if cmd.lower().startswith("help "):
-        args = cmd[5:].strip().split()
-        response = handle_help(args, registry)
-        append_text(f"\n{response}\n\n")
-        return
 
-    title = try_parse_quoted_heading(cmd)
-    if title is not None:
-        append_heading(title)
-        return
-
+    # Plot with CSV logging stays in this module (GUI-specific display).
     plot_parts = try_extract_plot_command(cmd)
     if plot_parts is not None:
         plot_file_label, plot_inner = plot_parts
@@ -73,7 +57,11 @@ def run_chat_command(
                 "Error: plot needs a valid bench command, e.g. plot bc.sg.measure frequency, "
                 'plot "My run" bc.osc.get_trace 1, or plot(bc.sg.measure frequency)\n\n'
             )
-            _emit_error("plot needs a valid bench command")
+            if record_result is not None:
+                try:
+                    record_result(command, error="plot needs a valid bench command")
+                except Exception:
+                    pass
             return
         try:
             result = registry.execute(parsed["category"], parsed["action"], parsed["args"])
@@ -89,32 +77,46 @@ def run_chat_command(
                 append_text(f"Result: {result}\n")
             append_plot_from_data(result)
             append_text("\n")
-            _emit_result(result)
+            if record_result is not None:
+                try:
+                    record_result(command, result=result)
+                except Exception:
+                    pass
         except ValueError as e:
             append_error(f"Error: {e}\n\n")
-            _emit_error(e)
+            if record_result is not None:
+                try:
+                    record_result(command, error=str(e))
+                except Exception:
+                    pass
         except Exception as e:
             append_error(f"Error: {e}\n\n")
-            _emit_error(e)
+            if record_result is not None:
+                try:
+                    record_result(command, error=str(e))
+                except Exception:
+                    pass
         return
 
-    parsed = parser.parse(cmd)
-    if not parsed:
-        append_error(
-            "Error: Invalid command format. Expected: bench.<category>.<action> or bc.<category>.<action> [args...]\n"
-        )
-        append_error("       Example: bench.ps.on True or bc.ps.on True\n")
-        append_error("       Type 'help' for all available commands\n\n")
+    title = try_parse_quoted_heading(cmd)
+    if title is not None:
+        append_heading(title)
+        return
+
+    outcome = bench.run_line(cmd, on_output=_out, on_error=_err, record=False)
+
+    if record_result is None:
         return
 
     try:
-        result = registry.execute(parsed["category"], parsed["action"], parsed["args"])
-        response = "OK" if result is None else str(result)
-        append_text(f"Result: {response}\n\n")
-        _emit_result(result)
-    except ValueError as e:
-        append_error(f"Error: {e}\n\n")
-        _emit_error(e)
-    except Exception as e:
-        append_error(f"Error: {e}\n\n")
-        _emit_error(e)
+        if outcome.check is not None:
+            if outcome.success:
+                record_result(command, result=outcome.check)
+            else:
+                record_result(command, error=outcome.message or "check failed")
+        elif outcome.success:
+            record_result(command, result=outcome.result)
+        else:
+            record_result(command, error=outcome.message or "error")
+    except Exception:
+        pass

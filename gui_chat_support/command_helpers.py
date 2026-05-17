@@ -3,7 +3,7 @@
 import re
 from typing import List, Optional, Tuple
 
-from testbench.command_parser import normalize_llm_command_prefix
+from testbench.command_parser import normalize_llm_command_prefix, try_parse_quoted_heading
 
 CHAT_MODE_AGENT = "agent"
 CHAT_MODE_PLAN = "plan"
@@ -14,16 +14,6 @@ _PLAN_DISCARD_WORDS = {"discard", "cancel", "discard plan", "cancel plan"}
 def normalize_chat_mode(value) -> str:
     s = str(value or "").strip().lower()
     return CHAT_MODE_PLAN if s == CHAT_MODE_PLAN else CHAT_MODE_AGENT
-
-
-def try_parse_quoted_heading(command: str):
-    """Heading only when the whole line is wrapped in double quotes."""
-    s = (command or "").strip()
-    m = re.match(r'^"(.*)"\s*$', s, re.DOTALL)
-    if not m:
-        return None
-    inner = (m.group(1) or "").strip()
-    return inner if inner else None
 
 
 def looks_like_direct_command(text: str) -> bool:
@@ -42,6 +32,10 @@ def looks_like_direct_command(text: str) -> bool:
     if tl.startswith("plot "):
         return True
     if tl.startswith("delay "):
+        return True
+    if tl.startswith("assert ") or tl.startswith("limit "):
+        return True
+    if tl.startswith("set "):
         return True
     if tl == "analyze" or tl.startswith("analyze "):
         return True
@@ -78,6 +72,12 @@ def validate_llm_commands(commands, parser) -> Tuple[List[str], Optional[str]]:
             continue
         cl = c.lower()
         if cl.startswith("delay ") or cl == "help" or cl.startswith("help "):
+            safe.append(c)
+            continue
+        if cl.startswith("assert ") or cl.startswith("limit ") or cl.startswith("set "):
+            safe.append(c)
+            continue
+        if cl.startswith("for ") or cl in {"endfor", "end"}:
             safe.append(c)
             continue
         if cl.startswith("plot "):

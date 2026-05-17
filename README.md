@@ -20,7 +20,9 @@ The core lives in **`src/testbench/`**: a **command parser**, **command registry
 | **Tests** | `pytest` under `tests/` (e.g. simulated instruments, help, autocomplete). |
 
 **Registered instrument categories** (keys in `CommandRegistry.INSTRUMENT_FACTORIES`):  
-`ps`, `osc`, `sg`, `sa`, `mm`, `fg`, `na`, `fc`, `el`, `smu`, `tc`, `pm` — plus virtual `config` for bench-wide settings.
+`ps`, `osc`, `sg`, `sa`, `mm`, `fg`, `na`, `fc`, `el`, `smu`, `tc`, `pm`, `san` — plus virtual `config` for bench-wide settings.
+
+**Scripting (headless):** `python -m testbench run script.bench` supports `assert`, `limit`, `set`/`$vars`, `for`/`endfor`, and `--report` / `--report-html` session exports. See `scripts/examples/`.
 
 ---
 

@@ -16,7 +16,16 @@ def normalize_llm_command_prefix(command: str, default_top: str = "bc") -> str:
     sl = s.lower()
     if sl.startswith("bench.") or sl.startswith("bc."):
         return s
-    if sl == "help" or sl.startswith("help ") or sl.startswith("plot ") or sl.startswith("delay "):
+    if (
+        sl == "help"
+        or sl.startswith("help ")
+        or sl.startswith("plot ")
+        or sl.startswith("delay ")
+        or sl.startswith("assert ")
+        or sl.startswith("limit ")
+        or sl.startswith("set ")
+        or sl.startswith("for ")
+    ):
         return s
     if re.match(r'^".*"\s*$', s, re.DOTALL):
         return s
@@ -106,6 +115,16 @@ def _format_instrument_commands(category: str, registry) -> str:
         lines.append(f"  {action:<20} {description}")
 
     return "\n".join(lines)
+
+
+def try_parse_quoted_heading(command: str) -> Optional[str]:
+    """Return heading text when the whole line is wrapped in double quotes."""
+    s = (command or "").strip()
+    m = re.match(r'^"(.*)"\s*$', s, re.DOTALL)
+    if not m:
+        return None
+    inner = (m.group(1) or "").strip()
+    return inner if inner else None
 
 
 # Example usage
