@@ -108,6 +108,7 @@ class CommandRegistry:
         'smu': SimulatedSourceMeasureUnit,
         'tc': SimulatedTemperatureChamber,
         'pm': SimulatedPowerMeter,
+        'san': SimulatedSignalAnalyzer,
     }
 
     def __init__(self, config_file: Optional[str] = None):
@@ -186,6 +187,7 @@ class CommandRegistry:
             'smu': 'Source Measure Unit',
             'tc': 'Temperature Chamber',
             'pm': 'Power Meter',
+            'san': 'Signal Analyzer',
             'config': 'Configuration Controls',
         }
         return names.get(category)

@@ -127,6 +127,16 @@
       "port": 5025,
       "timeout_ms": 5000,
       "description": "RF power meter"
+    },
+    "san": {
+      "name": "Signal Analyzer",
+      "simulate": true,
+      "type": "SignalAnalyzer",
+      "visa_resource": "GPIB0::13::INSTR",
+      "ip_address": "192.168.1.22",
+      "port": 5025,
+      "timeout_ms": 5000,
+      "description": "RF signal analyzer (distinct from spectrum analyzer sa)"
     }
   },
   "global_settings": {

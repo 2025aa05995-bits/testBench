@@ -45,6 +45,7 @@ from testbench.chat_plotting import (
 )
 from testbench.command_parser import CommandParser, handle_help
 from testbench.command_registry import CommandRegistry
+from testbench.runner import BenchRunner
 from testbench._paths import default_config_file
 from testbench.llm_chat import (
     PROVIDER_AZURE,
@@ -669,6 +670,12 @@ class ChatWindow(QMainWindow):
             self._run_next_sequence_step()
 
     def _start_command_sequence(self, commands: list, origin: str = "user", user_text: str = "") -> None:
+        try:
+            runner = BenchRunner(registry=self.registry, parser=self.parser)
+            commands = runner.expand(list(commands))
+        except ValueError as e:
+            self._append_error(f"Sequence expand error: {e}\n\n")
+            return
         self._sequence_active = True
         self._sequence_queue = list(commands)
         self._sequence_index = 0

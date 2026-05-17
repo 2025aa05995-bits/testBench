@@ -12,6 +12,9 @@ class SimulatedPowerSupply(PowerSupplyBase):
         'set_voltage': 'Set output voltage (V)',
         'setCurrent': 'Set current limit (A)',
         'set_current': 'Set current limit (A)',
+        'measure_voltage': 'Measure output voltage (V)',
+        'measure_current': 'Measure output current (A)',
+        'status': 'Return supply status dict',
     }
 
     def __init__(self, resource_name: Optional[str] = None):
@@ -126,5 +129,11 @@ class SimulatedPowerSupply(PowerSupplyBase):
             return self.set_voltage(float(args[0]))
         elif action in {'setCurrent', 'set_current'}:
             return self.set_current(float(args[0]))
+        elif action == 'measure_voltage':
+            return self.measure_voltage()
+        elif action == 'measure_current':
+            return self.measure_current()
+        elif action == 'status':
+            return self.status()
         else:
             raise ValueError(f"Unknown action: {action}")

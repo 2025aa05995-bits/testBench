@@ -1,0 +1,7 @@
+# Voltage sweep with variables
+bc.ps.on
+for V 3.0 3.6 0.2
+  bc.ps.set_voltage $V
+  limit bc.ps.measure_voltage min=2.9 max=3.7
+endfor
+bc.ps.off

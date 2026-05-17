@@ -1,0 +1,6 @@
+# Example headless script — run with:
+#   PYTHONPATH=src python -m testbench run scripts/examples/dmm_check.bench --report logs/last_run.json
+
+"DMM voltage check"
+assert bc.mm.measure_voltage 5.25 0.1
+limit bc.mm.measure_voltage min=5.0 max=5.5
