@@ -11,6 +11,16 @@ Analyze) via the `testbench.rag` module.
 You can change the list under `rag.extensions` in
 `config/testbenchconfig.json`.
 
+### Retrieval backend
+
+| `rag.backend` | Behavior |
+|---------------|----------|
+| `tfidf` (default) | In-memory TF–IDF, no extra packages |
+| `embeddings` | Semantic search via `sentence-transformers` (install optional) |
+
+Set `rag.embedding_model` (default `all-MiniLM-L6-v2`) when using embeddings.
+If the package is missing, the app falls back to TF–IDF automatically.
+
 ## How it works
 
 1. On the first LLM call (or after you change a file), the app scans this

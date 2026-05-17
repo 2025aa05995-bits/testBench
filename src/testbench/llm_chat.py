@@ -6,6 +6,11 @@ import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+from testbench.llm_plan_schema import (
+    finalize_plan,
+    plan_schema_prompt_section,
+    structured_plan_from_payload,
+)
 from testbench.rag import _summarize_results_for_query, retrieve_for_prompt
 
 # Config keys
@@ -163,13 +168,16 @@ def _system_prompt() -> str:
         '- "commands": array of strings\n'
         '- "analysis": string\n'
         "\n"
-        "Allowed command forms:\n"
+        + plan_schema_prompt_section()
+        + "\nAllowed command forms:\n"
         "- bench.<category>.<action> [args...]\n"
         "- bc.<category>.<action> [args...]\n"
         '- "delay <seconds>"\n'
         '- "help" or "help <category>"\n'
         '- plot <bench/bc command>  (or: plot "Label" <bench/bc command>)\n'
         '- quoted heading: "Title"\n'
+        '- assert <bench_command> <expected> <tolerance>\n'
+        '- limit <bench_command> <min> <max>  (or min=/max=/field= form)\n'
         "\n"
         "Rules:\n"
         "- Do NOT invent categories/actions; use only items in ALLOWED.\n"
@@ -183,7 +191,19 @@ def _system_prompt() -> str:
     )
 
 
-def _parse_plan_response(content: str) -> Tuple[List[str], str]:
+def _plan_include_checks(cfg: Optional[Dict[str, Any]]) -> bool:
+    llm = (cfg or {}).get("llm") if isinstance(cfg, dict) else {}
+    if not isinstance(llm, dict):
+        return True
+    v = llm.get("plan_include_checks", True)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() not in {"false", "0", "no", "off"}
+    return bool(v)
+
+
+def _parse_plan_response(content: str, cfg: Optional[Dict[str, Any]] = None) -> Tuple[List[str], str]:
     raw = (content or "").strip()
     if not raw:
         raise RuntimeError("Model returned empty response.")
@@ -203,18 +223,8 @@ def _parse_plan_response(content: str) -> Tuple[List[str], str]:
             f"Raw content:\n{raw}"
         ) from e
 
-    commands_raw = payload.get("commands", [])
-    if not isinstance(commands_raw, list):
-        raise RuntimeError('Invalid JSON: "commands" must be an array of strings.')
-    commands: List[str] = []
-    for c in commands_raw:
-        s = str(c).strip()
-        if s:
-            commands.append(s)
-
-    analysis = payload.get("analysis", "")
-    analysis = str(analysis).strip() if analysis is not None else ""
-    return commands, analysis
+    plan = structured_plan_from_payload(payload)
+    return finalize_plan(plan, include_checks=_plan_include_checks(cfg))
 
 
 def _azure_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], timeout_sec: float) -> Tuple[List[str], str]:
@@ -278,7 +288,7 @@ def _azure_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], time
         raise
 
     content = (resp.choices[0].message.content or "").strip()
-    return _parse_plan_response(content)
+    return _parse_plan_response(content, cfg)
 
 
 def _openai_direct_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any], timeout_sec: float) -> Tuple[List[str], str]:
@@ -333,7 +343,7 @@ def _openai_direct_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, An
         raise
 
     content = (resp.choices[0].message.content or "").strip()
-    return _parse_plan_response(content)
+    return _parse_plan_response(content, cfg)
 
 
 _PROVIDER_ALIASES = {
@@ -703,7 +713,7 @@ def _local_gguf_chat_to_plan(user_text: str, registry: Any, cfg: Dict[str, Any])
         {"role": "user", "content": user_content},
     ]
     content = _local_gguf_chat(messages, cfg, temperature=0.2)
-    return _parse_plan_response(content)
+    return _parse_plan_response(content, cfg)
 
 
 def _ping_messages() -> List[Dict[str, str]]:

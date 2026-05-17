@@ -63,6 +63,8 @@ class RagConfig:
     chunk_chars: int = _DEFAULT_CHUNK_CHARS
     chunk_overlap: int = _DEFAULT_CHUNK_OVERLAP
     max_context_chars: int = _DEFAULT_MAX_CONTEXT_CHARS
+    backend: str = "tfidf"  # tfidf | embeddings
+    embedding_model: str = "all-MiniLM-L6-v2"
 
     @classmethod
     def from_config(cls, cfg: Optional[Dict[str, Any]]) -> "RagConfig":
@@ -90,6 +92,12 @@ class RagConfig:
                 v = default
             return max(lo, min(hi, v))
 
+        backend = str(rag.get("backend", "tfidf") or "tfidf").strip().lower()
+        if backend not in {"tfidf", "embeddings", "embedding"}:
+            backend = "tfidf"
+        if backend == "embedding":
+            backend = "embeddings"
+
         return cls(
             enabled=bool(rag.get("enabled", True)),
             dir=str(rag.get("dir", _DEFAULT_DIR) or _DEFAULT_DIR),
@@ -98,6 +106,8 @@ class RagConfig:
             chunk_chars=_int("chunk_chars", _DEFAULT_CHUNK_CHARS, 200, 8000),
             chunk_overlap=_int("chunk_overlap", _DEFAULT_CHUNK_OVERLAP, 0, 4000),
             max_context_chars=_int("max_context_chars", _DEFAULT_MAX_CONTEXT_CHARS, 200, 32_000),
+            backend=backend,
+            embedding_model=str(rag.get("embedding_model", "all-MiniLM-L6-v2") or "all-MiniLM-L6-v2"),
         )
 
 
@@ -332,8 +342,8 @@ def format_context_for_prompt(hits: List[RagHit], max_chars: Optional[int] = Non
 
 
 _INDEX_LOCK = threading.Lock()
-_CACHED_INDEX: Optional[RagIndex] = None
-_CACHED_KEY: Optional[Tuple[str, Tuple]] = None
+_CACHED_INDEX: Optional[Any] = None
+_CACHED_KEY: Optional[Tuple[str, Tuple, str]] = None
 
 
 def _resolve_dir(rag_cfg: RagConfig, root: Optional[Path]) -> Path:
@@ -362,10 +372,26 @@ def get_index(
     docs_dir = _resolve_dir(rag_cfg, root)
     if not docs_dir.is_dir():
         return None
-    key = (str(docs_dir), (rag_cfg.extensions, rag_cfg.chunk_chars, rag_cfg.chunk_overlap))
+    key = (
+        str(docs_dir),
+        (rag_cfg.extensions, rag_cfg.chunk_chars, rag_cfg.chunk_overlap),
+        rag_cfg.backend,
+        rag_cfg.embedding_model,
+    )
     with _INDEX_LOCK:
         if force_reload or _CACHED_INDEX is None or _CACHED_KEY != key:
-            _CACHED_INDEX = RagIndex(docs_dir, rag_cfg)
+            if rag_cfg.backend == "embeddings":
+                try:
+                    from testbench.rag_embeddings import EmbeddingRagIndex, embeddings_available
+
+                    if embeddings_available():
+                        _CACHED_INDEX = EmbeddingRagIndex(docs_dir, rag_cfg)
+                    else:
+                        _CACHED_INDEX = RagIndex(docs_dir, rag_cfg)
+                except Exception:
+                    _CACHED_INDEX = RagIndex(docs_dir, rag_cfg)
+            else:
+                _CACHED_INDEX = RagIndex(docs_dir, rag_cfg)
             _CACHED_KEY = key
         elif _CACHED_INDEX.is_stale():
             _CACHED_INDEX.reload()
@@ -403,6 +429,16 @@ def index_status(cfg: Optional[Dict[str, Any]] = None, *, root: Optional[Path] =
     """Diagnostic dict: ``{enabled, dir, exists, files, chunks}`` for status display."""
     rag_cfg = RagConfig.from_config(cfg)
     docs_dir = _resolve_dir(rag_cfg, root)
+    backend = rag_cfg.backend
+    embed_ok = False
+    if backend == "embeddings":
+        try:
+            from testbench.rag_embeddings import embeddings_available
+
+            embed_ok = embeddings_available()
+        except Exception:
+            embed_ok = False
+
     out: Dict[str, Any] = {
         "enabled": bool(rag_cfg.enabled),
         "dir": str(docs_dir),
@@ -411,6 +447,9 @@ def index_status(cfg: Optional[Dict[str, Any]] = None, *, root: Optional[Path] =
         "chunks": 0,
         "extensions": list(rag_cfg.extensions),
         "top_k": rag_cfg.top_k,
+        "backend": backend,
+        "embedding_model": rag_cfg.embedding_model,
+        "embeddings_available": embed_ok,
     }
     if not rag_cfg.enabled or not docs_dir.is_dir():
         return out

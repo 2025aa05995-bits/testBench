@@ -198,8 +198,17 @@ After a sequence (especially from an LLM plan), the app can send captured result
 ### RAG (retrieval-augmented generation)
 
 1. Add text files under **`rag_docs/`** (SOPs, calibration notes, datasheets). See [rag_docs/README.md](rag_docs/README.md).
-2. On first LLM call, the app builds an in-memory **TF–IDF** index (no external embedding service).
+2. On first LLM call, the app builds an in-memory index over chunked documents.
 3. Top chunks are prepended as `CONTEXT:` in Plan and Analyze prompts.
+
+| `rag.backend` | Engine |
+|---------------|--------|
+| `tfidf` (default) | TF–IDF, no extra packages |
+| `embeddings` | `sentence-transformers` semantic search (optional install) |
+
+```powershell
+pip install sentence-transformers
+```
 
 **Chat commands:**
 
@@ -209,7 +218,27 @@ rag reload
 rag <search query>
 ```
 
-Configure in `testbenchconfig.json` → `rag`: `enabled`, `dir`, `extensions`, `top_k`, `chunk_chars`, `max_context_chars`.
+Configure in `testbenchconfig.json` → `rag`: `enabled`, `backend`, `embedding_model`, `dir`, `extensions`, `top_k`, `chunk_chars`, `max_context_chars`.
+
+### Structured plans with pass/fail checks
+
+In **Plan** mode, the LLM can return schema v2 JSON:
+
+```json
+{
+  "commands": ["bc.ps.set_voltage 3.3", "bc.ps.on"],
+  "analysis": "Apply 3.3 V and verify",
+  "checks": [
+    {"type": "limit", "command": "bc.ps.measure_voltage", "min": 3.0, "max": 3.6},
+    {"type": "assert", "command": "bc.mm.measure_voltage", "expected": 5.25, "tolerance": 0.1}
+  ],
+  "pass_criteria": ["Supply output within 3.3 V ±10%"]
+}
+```
+
+`checks` are converted to `assert` / `limit` script lines and appended to the proposed plan. Set `llm.plan_include_checks` to `false` to keep only raw `commands`.
+
+Ask naturally: *“Power the DUT at 3.3 V and verify voltage is in range”* — the model should emit both setup commands and checks.
 
 ### LLM-related GUI tips
 
