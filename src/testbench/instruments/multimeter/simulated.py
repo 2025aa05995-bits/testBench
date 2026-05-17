@@ -1,14 +1,17 @@
 from typing import Dict, Any, Optional
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import MultimeterBase
 
 
-class SimulatedMultimeter(MultimeterBase):
+class SimulatedMultimeter(MultimeterBase, SimulatedInstrumentMixin):
     """Simulated multimeter for testing without real hardware."""
 
-    ACTIONS = {
+    ACTIONS = merge_simulated_actions({
         'measure_voltage': 'Measure DC voltage',
         'measure_current': 'Measure DC current',
-    }
+        'measure_resistance': 'Measure resistance (ohms)',
+        'measure_continuity': 'Measure continuity (true/false)',
+    })
 
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_MM_01")
@@ -30,41 +33,42 @@ class SimulatedMultimeter(MultimeterBase):
         self._auto_range_enabled = True
         self._range = None
         self._measurement_type = 'voltage_dc'
+        self._sim_fault = None
         print(f"[SIMULATED] Multimeter reset")
 
     def identify(self) -> str:
         return f"SimulatedMultimeter (resource: {self.resource_name})"
 
     def measure_voltage(self, dc: bool = True) -> float:
-        if not self.connected:
-            raise RuntimeError("Not connected")
-        return 5.25 if dc else 2.5
+        self.sim_require_connected()
+        self.sim_wait_settling()
+        raw = 5.25 if dc else 2.5
+        return self.sim_apply_noise(raw)
 
     def measure_current(self, dc: bool = True) -> float:
-        if not self.connected:
-            raise RuntimeError("Not connected")
-        return 0.125 if dc else 0.05
+        self.sim_require_connected()
+        self.sim_wait_settling()
+        raw = 0.125 if dc else 0.05
+        return self.sim_apply_noise(raw)
 
     def measure_resistance(self) -> float:
-        if not self.connected:
-            raise RuntimeError("Not connected")
-        return 1000.0
+        self.sim_require_connected()
+        self.sim_wait_settling()
+        return self.sim_apply_noise(1000.0)
 
     def measure_continuity(self) -> bool:
-        if not self.connected:
-            raise RuntimeError("Not connected")
+        self.sim_require_connected()
+        self.sim_wait_settling()
         return True
 
     def set_range(self, measurement: str, value: Optional[float] = None) -> None:
-        if not self.connected:
-            raise RuntimeError("Not connected")
+        self.sim_require_connected()
         self._measurement_type = measurement
         self._range = value
         print(f"[SIMULATED] Range set: {measurement} = {value}")
 
     def auto_range(self, enabled: bool) -> None:
-        if not self.connected:
-            raise RuntimeError("Not connected")
+        self.sim_require_connected()
         self._auto_range_enabled = enabled
         print(f"[SIMULATED] Auto-range {'enabled' if enabled else 'disabled'}")
 
@@ -81,23 +85,22 @@ class SimulatedMultimeter(MultimeterBase):
         if 'auto_range' in settings:
             self.auto_range(settings['auto_range'])
         if 'range' in settings:
-            self.set_range(settings.get(
-                'measurement', 'voltage'), settings['range'])
+            self.set_range(settings.get('measurement', 'voltage'), settings['range'])
 
     def measure(self, parameter: str) -> Any:
         if parameter == 'voltage':
             return self.measure_voltage()
-        elif parameter == 'current':
+        if parameter == 'current':
             return self.measure_current()
-        elif parameter == 'resistance':
+        if parameter == 'resistance':
             return self.measure_resistance()
-        else:
-            raise ValueError(f"Unknown parameter: {parameter}")
+        raise ValueError(f"Unknown parameter: {parameter}")
 
     def execute(self, action: str, args: list) -> Any:
-        if action == 'measure_voltage':
-            return self.measure_voltage()
-        elif action == 'measure_current':
-            return self.measure_current()
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'measure_voltage': lambda a: self.measure_voltage(),
+            'measure_current': lambda a: self.measure_current(),
+            'measure_resistance': lambda a: self.measure_resistance(),
+            'measure_continuity': lambda a: self.measure_continuity(),
+        }
+        return self._dispatch_or_raise(action, args, handlers)

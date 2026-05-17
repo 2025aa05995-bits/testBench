@@ -1,11 +1,12 @@
 from typing import Dict, Any, Optional
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import SignalGeneratorBase
 
 
-class SimulatedSignalGenerator(SignalGeneratorBase):
+class SimulatedSignalGenerator(SignalGeneratorBase, SimulatedInstrumentMixin):
     """Simulated signal generator for testing without real hardware."""
 
-    ACTIONS = {
+    ACTIONS = merge_simulated_actions({
         'output_on': 'Enable signal output',
         'output_off': 'Disable signal output',
         'setFrequency': 'Set frequency (Hz)',
@@ -13,7 +14,7 @@ class SimulatedSignalGenerator(SignalGeneratorBase):
         'setAmplitude': 'Set amplitude (V)',
         'set_amplitude': 'Set amplitude (V)',
         'measure': 'Read parameter (frequency|amplitude)',
-    }
+    })
 
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_SG_01")
@@ -114,16 +115,15 @@ class SimulatedSignalGenerator(SignalGeneratorBase):
             raise ValueError(f"Unknown parameter: {parameter}")
 
     def execute(self, action: str, args: list) -> Any:
-        if action == 'output_on':
-            return self.output_on()
-        elif action == 'output_off':
-            return self.output_off()
-        elif action in {'setFrequency', 'set_frequency'}:
-            return self.set_frequency(float(args[0]))
-        elif action in {'setAmplitude', 'set_amplitude'}:
-            return self.set_amplitude(float(args[0]))
-        elif action == 'measure':
-            param = (args[0] if args else 'frequency').strip().lower()
-            return self.measure(param)
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'output_on': lambda a: self.output_on(),
+            'output_off': lambda a: self.output_off(),
+            'setFrequency': lambda a: self.set_frequency(float(a[0])),
+            'set_frequency': lambda a: self.set_frequency(float(a[0])),
+            'setAmplitude': lambda a: self.set_amplitude(float(a[0])),
+            'set_amplitude': lambda a: self.set_amplitude(float(a[0])),
+            'measure': lambda a: self.sim_apply_noise_optional(
+                self.measure((a[0] if a else 'frequency').strip().lower())
+            ),
+        }
+        return self._dispatch_or_raise(action, args, handlers)

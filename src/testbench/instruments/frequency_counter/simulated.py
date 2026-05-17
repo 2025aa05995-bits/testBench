@@ -1,13 +1,16 @@
 from typing import Dict, Any, Optional
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import FrequencyCounterBase
 
 
-class SimulatedFrequencyCounter(FrequencyCounterBase):
+class SimulatedFrequencyCounter(FrequencyCounterBase, SimulatedInstrumentMixin):
     """Simulated frequency counter for testing without real hardware."""
 
-    ACTIONS = {
-        'measure': 'Measure frequency',
-    }
+    ACTIONS = merge_simulated_actions({
+        'measure': 'Measure frequency (Hz)',
+        'measure_frequency': 'Measure frequency (Hz)',
+        'measure_period': 'Measure period (s)',
+    })
 
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_FC_01")
@@ -78,7 +81,9 @@ class SimulatedFrequencyCounter(FrequencyCounterBase):
             raise ValueError(f"Unknown parameter: {parameter}")
 
     def execute(self, action: str, args: list) -> Any:
-        if action == 'measure':
-            return self.measure_frequency()
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'measure': lambda a: self.sim_apply_noise_optional(self.measure_frequency()),
+            'measure_frequency': lambda a: self.sim_apply_noise_optional(self.measure_frequency()),
+            'measure_period': lambda a: self.sim_apply_noise_optional(self.measure_period()),
+        }
+        return self._dispatch_or_raise(action, args, handlers)

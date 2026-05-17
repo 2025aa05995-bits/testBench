@@ -29,6 +29,7 @@ class ConfigInterface:
         'reload': 'Reload configuration from config file',
         'show': 'Show the current configuration and instrument modes',
         'discover': 'Discover available VISA, serial, and TCP/IP devices',
+        'bind': 'Bind address to instrument: bind <category> <visa|serial|tcp> <address>',
         'set_simulation': 'Toggle simulation/real mode for an instrument',
         'status': 'Show connection status for a specific instrument',
     }
@@ -49,6 +50,19 @@ class ConfigInterface:
         if action == 'discover':
             devices = self.config_manager.discover_available_devices()
             return self._format_discovery(devices)
+
+        if action == 'bind':
+            if len(args) < 3:
+                raise ValueError(
+                    'Usage: bench.config.bind <category> <visa|serial|tcp> <address>'
+                )
+            category, transport, address = args[0], args[1], ' '.join(args[2:])
+            updated = self.config_manager.bind_instrument(category, transport, address)
+            self.registry.reload_instruments()
+            return (
+                f"Bound {category} to {transport} {address!r} "
+                f"(protocol={updated.get('protocol')}). Configuration saved."
+            )
 
         if action == 'set_simulation':
             if len(args) < 2:

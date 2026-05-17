@@ -22,7 +22,8 @@ The core lives in **`src/testbench/`**: command parser, registry, config manager
 | **GUI (`gui_chat.py`)** | Log + command composer, autocomplete, history, **plots**, **sequences** (record/save/run), **LLM** Plan/Agent modes, **Settings** (bench JSON, fonts, LLM), status line. |
 | **LLM** | Natural language → proposed `bc.*` command lists; **Plan** (review then `run` / `discard`) or **Agent** (execute when safe). Post-run **analyze** with optional plots. |
 | **RAG** | TF–IDF index over `rag_docs/` injects SOP/datasheet context into LLM prompts. Chat: `rag`, `rag reload`, `rag status`. |
-| **Tests** | `pytest` under `tests/` (instruments, help, LLM parsing, RAG, runner, assert/limit). |
+| **Simulation extras** | All sim drivers: `reset`, `status`, `identify`, fault injection, measurement noise, settling delay. FG: **ARB CSV** waveforms. **Bench → Bind** maps discovered VISA/serial/TCP addresses to config. |
+| **Tests** | `pytest` under `tests/` (instruments, help, LLM parsing, RAG, runner, assert/limit, simulated mixin). |
 
 **Registered instrument categories** (`CommandRegistry.INSTRUMENT_FACTORIES`):
 
@@ -145,6 +146,14 @@ endfor
 Each headless run records steps with status `ok`, `pass`, `fail`, `error`, or `heading`. Exports use schema **`testbench.session.v1`** (JSON) or a summary HTML table (`--report` / `--report-html`).
 
 Examples: [scripts/examples/dmm_check.bench](scripts/examples/dmm_check.bench), [scripts/examples/voltage_sweep.bench](scripts/examples/voltage_sweep.bench).
+
+Simulated instruments, faults, ARB, and `sa` vs `san`: [docs/SIMULATED_INSTRUMENTS.md](docs/SIMULATED_INSTRUMENTS.md).
+
+```text
+bc.fg.load_arb_csv scripts/examples/arb_sine.csv
+bc.config.bind ps visa GPIB0::1::INSTR
+bc.mm.fault_inject overload
+```
 
 ---
 

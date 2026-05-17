@@ -1,14 +1,17 @@
 from typing import Dict, Any, Optional
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import ElectronicLoadBase
 
 
-class SimulatedElectronicLoad(ElectronicLoadBase):
+class SimulatedElectronicLoad(ElectronicLoadBase, SimulatedInstrumentMixin):
     """Simulated electronic load for testing without real hardware."""
 
-    ACTIONS = {
+    ACTIONS = merge_simulated_actions({
         'enable': 'Enable electronic load',
         'disable': 'Disable electronic load',
-    }
+        'measure_voltage': 'Measure input voltage (V)',
+        'measure_current': 'Measure input current (A)',
+    })
 
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_EL_01")
@@ -115,9 +118,10 @@ class SimulatedElectronicLoad(ElectronicLoadBase):
             raise ValueError(f"Unknown parameter: {parameter}")
 
     def execute(self, action: str, args: list) -> Any:
-        if action == 'enable':
-            return self.enable()
-        elif action == 'disable':
-            return self.disable()
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'enable': lambda a: self.enable(),
+            'disable': lambda a: self.disable(),
+            'measure_voltage': lambda a: self.sim_apply_noise_optional(self.measure_voltage()),
+            'measure_current': lambda a: self.sim_apply_noise_optional(self.measure_current()),
+        }
+        return self._dispatch_or_raise(action, args, handlers)

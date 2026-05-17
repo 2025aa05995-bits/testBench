@@ -75,24 +75,78 @@ sg.output_off()
 sg.disconnect()
 ```
 
-## Running Tests
+### SimulatedFunctionGenerator (ARB waveforms)
+Located in: `src/testbench/instruments/function_generator/simulated.py`
 
-Execute the test suite:
-```bash
-python test_simulated_instruments.py
+Load arbitrary waveforms from CSV and play as `arb` waveform:
+
+```text
+bc.fg.load_arb_csv scripts/examples/arb_sine.csv
+bc.fg.set_waveform arb
+bc.fg.output_on
+bc.fg.get_arb
 ```
 
-This runs comprehensive tests for all three simulated instruments and displays their status and measurements.
+CSV: one voltage column, or `time_s,voltage_v` columns. See `scripts/examples/arb_sine.csv`.
+
+### Spectrum analyzer (`sa`) vs signal analyzer (`san`)
+
+| Key | Device | Typical use |
+|-----|--------|-------------|
+| `sa` | Spectrum analyzer | Sweeps, `get_trace`, `measure_peak` |
+| `san` | Signal analyzer | Capture, `get_spectrum`, `measure_power` |
+
+## Shared simulated commands
+
+Every simulated driver includes these **bench actions** (via `SimulatedInstrumentMixin`):
+
+| Action | Description |
+|--------|-------------|
+| `reset` | Reset to defaults |
+| `status` | Status dict (+ sim fault/noise fields) |
+| `identify` | Simulated ID string |
+| `fault_inject` | `disconnect`, `overload`, or `read_error` |
+| `fault_clear` | Clear fault |
+| `sim_noise_on` / `sim_noise_off` | Toggle Gaussian noise on numeric reads |
+| `sim_settling` | Set delay (ms) before next measurement |
+
+**Examples:**
+```text
+bc.mm.fault_inject disconnect
+bc.mm.fault_clear
+bc.ps.sim_settling 100
+bc.mm.sim_noise_off
+bc.mm.measure_voltage
+```
+
+## Bind discovered hardware (real mode)
+
+**CLI:**
+```text
+bc.config.discover
+bc.config.bind ps visa GPIB0::1::INSTR
+bc.config.bind mm serial COM7
+bc.config.bind ps tcp 192.168.1.10:5025
+```
+
+**GUI (PyQt):** **Bench → Bind instrument…** — discover, pick address, save to `testbenchconfig.json`.
+
+## Running Tests
+
+```powershell
+$env:PYTHONPATH = "src"
+pytest tests/test_simulated_instruments.py tests/test_simulated_mixin.py -q
+```
 
 ## Base Class Implementation
 
 All simulated instruments implement their respective base class methods:
 - `connect()` / `disconnect()` - Connection management
-- `reset()` - Reset to default state
-- `identify()` - Query instrument info
-- `status()` - Get current configuration as dict
+- `reset()` - Reset to default state (also exposed as `bc.<cat>.reset`)
+- `identify()` - Query instrument info (`bc.<cat>.identify`)
+- `status()` - Get current configuration as dict (`bc.<cat>.status`)
 - `configure(**settings)` - Bulk configuration
-- `measure(parameter)` - Single measurement
+- `measure(parameter)` - Single measurement (where applicable)
 - `execute(action, args)` - Command execution
 
 ## Extending with Real Instruments

@@ -1,13 +1,16 @@
 from typing import Dict, Any, Optional
+from ..simulated_mixin import SimulatedInstrumentMixin, merge_simulated_actions
 from .base import PowerMeterBase
 
 
-class SimulatedPowerMeter(PowerMeterBase):
+class SimulatedPowerMeter(PowerMeterBase, SimulatedInstrumentMixin):
     """Simulated optical power meter for testing without real hardware."""
 
-    ACTIONS = {
-        'measure': 'Measure optical power',
-    }
+    ACTIONS = merge_simulated_actions({
+        'measure': 'Measure optical power (dBm)',
+        'measure_power': 'Measure optical power (dBm)',
+        'measure_energy': 'Measure optical energy',
+    })
 
     def __init__(self, resource_name: Optional[str] = None):
         super().__init__(resource_name or "SIM_PM_01")
@@ -80,7 +83,9 @@ class SimulatedPowerMeter(PowerMeterBase):
             raise ValueError(f"Unknown parameter: {parameter}")
 
     def execute(self, action: str, args: list) -> Any:
-        if action == 'measure':
-            return self.measure_power()
-        else:
-            raise ValueError(f"Unknown action: {action}")
+        handlers = {
+            'measure': lambda a: self.sim_apply_noise_optional(self.measure_power()),
+            'measure_power': lambda a: self.sim_apply_noise_optional(self.measure_power()),
+            'measure_energy': lambda a: self.sim_apply_noise_optional(self.measure_energy()),
+        }
+        return self._dispatch_or_raise(action, args, handlers)
